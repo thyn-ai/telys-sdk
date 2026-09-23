@@ -1,0 +1,33 @@
+name: Bug report
+description: Something in the Telys SDK or MCP server isn't working as expected.
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      placeholder: e.g. telys 0.1.5
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: A small code snippet that reproduces the issue.
+      render: python
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, runtime platform (macOS arm64 / Linux x86_64 / arm64), and anything else relevant.
+    validations:
+      required: false

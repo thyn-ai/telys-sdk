@@ -1,4 +1,4 @@
-# Telys
+# telys
 
 <!-- mcp-name: io.github.thyn-ai/telys -->
 
@@ -18,8 +18,6 @@ or signed-binary backends.
 
 ```bash
 pipx install telys
-# …or the one-liner (installs via pipx):
-curl -fsSL https://telys.ai/install.sh | sh
 
 telys login          # sign in → free device license + signed runtime; fully offline thereafter
 ```

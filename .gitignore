@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Node / TypeScript
+node_modules/
+*.tsbuildinfo
+npm-debug.log*
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local Telys data — a Telys("./memory") collection directory is user data,
+# never repository content
+/memory/
+
+# Secrets — never commit key material of any kind. The *_pub.pem files under
+# packages/telys-sdk/telys/_keys/ are public trust anchors that MUST ship
+# (see that directory's README) — the negation keeps them tracked.
+*.pem
+*.key
+!*_pub.pem
