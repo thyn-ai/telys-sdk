@@ -1,0 +1,10 @@
+Telys
+Copyright (c) 2026 Seville AI Technologies, Inc. d/b/a Thyn (thyn.ai)
+
+This product includes software developed by Seville AI Technologies, Inc. d/b/a Thyn
+(https://thyn.ai).
+
+This repository is licensed under the Apache License, Version 2.0 (see
+./LICENSE). Telys runs on the Algenta engine (https://algenta.ai) through the
+published algenta-core and algenta-sdk packages; the engine and its runtime are
+separately distributed under the Algenta engine license, not Apache-2.0.

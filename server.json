@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.thyn-ai/telys",
+  "title": "Telys — on-device memory",
+  "description": "Private on-device memory & retrieval for AI assistants — offline vector + lexical search.",
+  "repository": {
+    "url": "https://github.com/thyn-ai/telys-sdk",
+    "source": "github"
+  },
+  "websiteUrl": "https://telys.ai",
+  "version": "0.1.4",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "telys",
+      "version": "0.1.4",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "description": "Run the Telys MCP stdio server (after `telys login`)."
+        }
+      ]
+    }
+  ]
+}

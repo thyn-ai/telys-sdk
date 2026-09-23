@@ -1,0 +1,53 @@
+[project]
+name = "telys"
+version = "0.1.4"
+description = "Telys — public, thin SDK for embedded on-device memory & retrieval (in-process, zero cloud roundtrips)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+# Telys is a product of Thyn (thyn.ai), the parent company.
+authors = [{ name = "Thyn", email = "eng@thyn.ai" }]
+maintainers = [{ name = "Thyn", email = "eng@thyn.ai" }]
+keywords = ["memory", "retrieval", "vector-search", "embeddings", "rag", "on-device", "sdk", "telys"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Thin SDK: facades, types, provider/tuner interfaces, runtime loader, CLI. The engine is a separate, closed,
+# on-device runtime fetched by `telys runtime install` (D-30) — NOT a dependency of this package.
+dependencies = [
+  "numpy>=1.24",          # the facade marshals float32 arrays to/from the runtime
+  "cryptography>=42",     # offline verification of the signed runtime manifest + RS256 license (D-31 #3/#5)
+]
+
+[project.optional-dependencies]
+# Local development: pull the runtime as an editable/local package instead of `telys runtime install`.
+runtime = ["telys-runtime"]
+
+[project.scripts]
+telys = "telys.cli:main"
+
+[project.urls]
+Homepage = "https://telys.ai"
+Documentation = "https://docs.telys.ai"
+Changelog = "https://docs.telys.ai/changelog"
+Company = "https://thyn.ai"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["telys"]   # PUBLIC SDK only — no engine modules (enforced by scripts/check_public_wheel.py)
+# Force-include the embedded PUBLIC verification keys: they match the global `*.pem` gitignore (so the wheel
+# would otherwise drop them), but they are public trust anchors that MUST ship. ONLY *_pub.pem — never private.
+artifacts = ["telys/_keys/*_pub.pem"]
