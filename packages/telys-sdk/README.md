@@ -57,7 +57,7 @@ pip install "telys[runtime]"   # or: pip install telys-runtime
 `telys mcp` runs Telys as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio,
 exposing **19 tools** — the full memory surface (CRUD, filtered queries, lexical search, compaction / IVF /
 tuning, plus a repo auto-indexer) — to any MCP client (Claude Desktop/Code, Cursor, Codex, Qwen Code, …).
-Everything is local and offline; no API key in the client config.
+Everything is local and offline. Introspection (`initialize`/`tools/list`) needs no credentials; executing memory tools requires the one-time free `telys login` (device authorization, free community plan) — fully offline thereafter, no API key in the client config.
 
 ```bash
 pipx install telys
