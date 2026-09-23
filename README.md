@@ -2,13 +2,15 @@
 
 <!-- mcp-name: io.github.thyn-ai/telys -->
 
-**Public, thin SDK** for **Telys** — embedded, on-device memory & retrieval. In-process, **zero cloud
+**Public SDK** for **Telys** — embedded, on-device memory & retrieval. In-process, **zero cloud
 roundtrips** at query time.
 
-This package contains only the developer-facing surface: the `Telys`/`Collection` facades, query/filter
-types, the `EmbeddingProvider` interface, the `Tuner`/`TuningPlan` interfaces, a runtime loader, and the
-`telys` CLI. **It contains no engine implementation** — the engine is a separate, closed, signed, on-device
-runtime fetched by `telys runtime install` (the D-30 distribution decision: public SDK + closed runtime).
+This package contains the complete developer-facing surface: the `Telys`/`Collection` facades, query/filter
+types, the `EmbeddingProvider` interface, the `Tuner`/`TuningPlan` interfaces, the **full MCP server**
+(`telys/mcp.py` — 19 tools, protocol 2025-06-18, stdio), a runtime loader, and the `telys` CLI. The
+numerical kernel (`libame_kernel`) the tools drive is a separately distributed, signed on-device runtime
+fetched by `telys login` (free community license) — the same arrangement as MCP servers that front hosted
+or signed-binary backends.
 
 ## Install
 
