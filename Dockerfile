@@ -11,7 +11,7 @@
 FROM ghcr.io/astral-sh/uv:debian
 
 RUN uv venv --seed /v \
- && /v/bin/pip install --no-cache telys==0.1.5 \
+ && /v/bin/pip install --no-cache telys==0.1.6 \
  && ln -sf /v/bin/telys /usr/local/bin/telys
 
 CMD ["telys", "mcp"]
