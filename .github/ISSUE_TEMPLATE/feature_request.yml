@@ -1,0 +1,17 @@
+name: Feature request
+description: Request a capability the Telys SDK or MCP server doesn't expose today.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What capability do you want?
+      description: Describe the use case, not just the API shape you'd guess at.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why isn't an existing method or tool sufficient?
+    validations:
+      required: false
