@@ -765,12 +765,13 @@ TOOLS = [
      "description": ("Semantic + lexical search over a Telys memory collection: the server embeds "
                      "`query` with its built-in on-device embedder and returns the best-matching "
                      "live rows as hits (id, score, metadata). Use to recall stored "
-                     "notes/facts/decisions before answering. Required: collection, query. "
-                     "Optional: top_k (default 5) and where — a single-key equality filter such "
-                     "as scope=project:acme (one key only; MCP-created collections are "
-                     "partitioned by `scope`). Fails (isError) when the collection does not exist "
-                     "— write first via telys_add or telys_create_collection — or when `where` "
-                     "carries more than one key."),
+                     "notes/facts/decisions before answering. Choose this embedding-ranked path "
+                     "when wording varies; choose telys_search_lexical when exact terms and BM25 "
+                     "scoring matter. Required: collection, query. Optional: top_k (default 5) "
+                     "and where — a single-key equality filter such as scope=project:acme (one "
+                     "key only; MCP-created collections are partitioned by `scope`). Fails "
+                     "(isError) when the collection does not exist — write first via telys_add or "
+                     "telys_create_collection — or when `where` carries more than one key."),
      "inputSchema": {"type": "object", "required": ["collection", "query"], "properties": {
          "collection": {"type": "string",
                         "description": "name of an existing collection in the active store"},
@@ -835,8 +836,9 @@ TOOLS = [
      "description": ("Report stats for one Telys memory collection: name, partition key name, and "
                      "live external-id count, plus runtime-provided counters (row counts, "
                      "dimension, index state) that vary by runtime version. Use to confirm a "
-                     "collection exists and gauge its size. Required: collection. Fails when the "
-                     "collection does not exist."),
+                     "collection exists and gauge its size. Siblings: telys_list_collections "
+                     "enumerates collections; telys_count returns cardinality only. Required: "
+                     "collection. Fails when the collection does not exist."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
          "collection": {"type": "string",
                         "description": "name of an existing collection in the active store"}}},
@@ -957,12 +959,14 @@ TOOLS = [
     # ── query variants ────────────────────────────────────────────────────────────────────────────────────
     {"name": "telys_search_lexical",
      "description": ("On-device BM25 lexical (keyword) search — exact-term matching for "
-                     "identifiers and rare tokens where semantic search is fuzzy. Requires the "
-                     "collection to have been created with lexical=True AND telys_build_lexical "
-                     "to have run, otherwise the call fails. Required: collection, query. "
-                     "Optional: top_k (default 5), where (single-key equality filter), explain "
-                     "(default false; include per-hit score explanations). Fails when the "
-                     "collection does not exist or the lexical index was never built."),
+                     "identifiers and rare tokens where semantic search is fuzzy. Sibling: use "
+                     "telys_search for embedding-ranked (vector) retrieval; this tool is the BM25 "
+                     "path, no embedding involved. Requires the collection to have been created "
+                     "with lexical=True AND telys_build_lexical to have run, otherwise the call "
+                     "fails. Required: collection, query. Optional: top_k (default 5), where "
+                     "(single-key equality filter), explain (default false; include per-hit score "
+                     "explanations). Fails when the collection does not exist or the lexical "
+                     "index was never built."),
      "inputSchema": {"type": "object", "required": ["collection", "query"], "properties": {
          "collection": {"type": "string",
                         "description": "name of an existing collection created with lexical=True"},
@@ -979,9 +983,10 @@ TOOLS = [
     {"name": "telys_compact",
      "description": ("Flush tombstones and merge the delta segment into the base layout, "
                      "physically reclaiming space from deleted/updated rows; the store is "
-                     "persisted. Use after large delete or update batches. Required: collection. "
-                     "Repeating with no pending changes is a no-op. Fails when the collection "
-                     "does not exist."),
+                     "persisted. Use after large delete or update batches. Alternatives: "
+                     "telys_delete to remove rows, telys_tune for index tuning. Required: "
+                     "collection. Repeating with no pending changes is a no-op. Fails when the "
+                     "collection does not exist."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
          "collection": {"type": "string",
                         "description": "name of an existing collection in the active store"}}},
@@ -1009,10 +1014,12 @@ TOOLS = [
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_build_lexical",
      "description": ("Fit the BM25 lexical index over the collection's retained tokens and "
-                     "persist it; the collection must have been created with lexical=True. Run "
-                     "after bulk ingestion and before telys_search_lexical. Required: collection. "
-                     "Optional: k1 (default 1.8; term-frequency saturation) and b (default 1.0; "
-                     "document-length normalization). Fails when the collection does not exist."),
+                     "persist it; the collection must have been created with lexical=True. This "
+                     "builds the lexical BM25 index; telys_build_ivf builds the IVF vector index. "
+                     "Run after bulk ingestion and before telys_search_lexical. Required: "
+                     "collection. Optional: k1 (default 1.8; term-frequency saturation) and b "
+                     "(default 1.0; document-length normalization). Fails when the collection "
+                     "does not exist."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
          "collection": {"type": "string",
                         "description": "name of an existing collection created with lexical=True"},
@@ -1023,10 +1030,11 @@ TOOLS = [
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_tune",
      "description": ("Produce a TuningPlan for a collection via its Tuner, and optionally apply "
-                     "it. Use to inspect or apply index/maintenance recommendations. Required: "
-                     "collection. Optional: dry_run — true never applies (plan only), false "
-                     "always applies, omit for the tuner default. Fails when the collection does "
-                     "not exist."),
+                     "it. Use to inspect or apply index/maintenance recommendations. Sibling: "
+                     "telys_build_ivf builds the IVF index directly; this tool plans and "
+                     "optionally applies tuning. Required: collection. Optional: dry_run — true "
+                     "never applies (plan only), false always applies, omit for the tuner "
+                     "default. Fails when the collection does not exist."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
          "collection": {"type": "string",
                         "description": "name of an existing collection in the active store"},
@@ -1043,13 +1051,15 @@ TOOLS = [
                      "refused — chunk every text file, and ingest the chunks into a collection "
                      "for telys_repo_search. Incremental: re-calls re-fingerprint each file "
                      "(size, mtime), re-embed only changed files, tombstone removed ones, and "
-                     "no-op fast when nothing changed. All arguments optional: path (repo root; "
-                     "default: the server workspace, else CWD), collection (default "
-                     "'repo_symbols'), mode ('windowed' default or 'file'), window_lines (48), "
-                     "window_overlap_lines (8), max_file_bytes / max_files / max_seconds (0 = "
-                     "unlimited), force (default false; rebuild every file). Fails when path is "
-                     "not a directory or the collection already exists with a partition key other "
-                     "than repo_id."),
+                     "no-op fast when nothing changed. Routing: telys_repo_search queries the "
+                     "index; telys_add/telys_upsert store manual memories. Returns status "
+                     "(built/refreshed/hit), repo_id, and file/chunk counts. All arguments "
+                     "optional: path (repo root; default: the server workspace, else CWD), "
+                     "collection (default 'repo_symbols'), mode ('windowed' default or 'file'), "
+                     "window_lines (48), window_overlap_lines (8), max_file_bytes / max_files / "
+                     "max_seconds (0 = unlimited), force (default false; rebuild every file). "
+                     "Fails when path is not a directory or the collection already exists with a "
+                     "partition key other than repo_id."),
      "inputSchema": {"type": "object", "properties": {
          "path": {"type": "string",
                   "description": "repo root (defaults to server workspace / CWD)"},
