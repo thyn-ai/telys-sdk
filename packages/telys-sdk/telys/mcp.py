@@ -756,7 +756,8 @@ def _guess_language(rel: str) -> str:
 # ── MCP tool schemas ────────────────────────────────────────────────────────────────────────────────────────
 
 _WHERE_SCHEMA = {"type": "object", "maxProperties": 1,
-                 "description": "optional single-key equality filter"}
+                 "description": ("optional single-key equality filter, e.g. scope=project:acme "
+                                 "(one key only)")}
 
 TOOLS = [
     # ── existing 5 ────────────────────────────────────────────────────────────────────────────────────────
@@ -771,8 +772,13 @@ TOOLS = [
                      "— write first via telys_add or telys_create_collection — or when `where` "
                      "carries more than one key."),
      "inputSchema": {"type": "object", "required": ["collection", "query"], "properties": {
-         "collection": {"type": "string"}, "query": {"type": "string"},
-         "top_k": {"type": "integer", "default": 5}, "where": _WHERE_SCHEMA}},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection in the active store"},
+         "query": {"type": "string",
+                   "description": "text query; embedded on-device before searching"},
+         "top_k": {"type": "integer", "default": 5,
+                   "description": "maximum hits to return, ordered best-first"},
+         "where": _WHERE_SCHEMA}},
      "annotations": {"readOnlyHint": True, "destructiveHint": False,
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_add",
@@ -787,9 +793,17 @@ TOOLS = [
                      "ids are freshly generated per call, so a repeat call inserts additional new "
                      "rows."),
      "inputSchema": {"type": "object", "required": ["collection", "texts"], "properties": {
-         "collection": {"type": "string"}, "texts": {"type": "array", "items": {"type": "string"}},
-         "ids": {"type": "array", "items": {"type": "string"}},
-         "metadata": {"type": "array", "items": {"type": "object"}}}},
+         "collection": {"type": "string",
+                        "description": "target collection; auto-created with "
+                        "partition_by='scope' when absent"},
+         "texts": {"type": "array", "items": {"type": "string"},
+                   "description": "documents to embed on-device and insert; one new row per text"},
+         "ids": {"type": "array", "items": {"type": "string"},
+                 "description": "external ids, one per text positionally; auto-generated when "
+                 "omitted"},
+         "metadata": {"type": "array", "items": {"type": "object"},
+                      "description": "one object per text positionally; set `scope` to route "
+                      "partitions"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": False,
                      "idempotentHint": False, "openWorldHint": False}},
     {"name": "telys_create_collection",
@@ -802,7 +816,9 @@ TOOLS = [
                      "mutating tool (telys_add, telys_upsert, …) writes to it. Repeating with the "
                      "same name returns the existing collection unchanged."),
      "inputSchema": {"type": "object", "required": ["name"], "properties": {
-         "name": {"type": "string"}, "partition_by": {"type": "string", "default": "scope"}}},
+         "name": {"type": "string", "description": "name for the new collection"},
+         "partition_by": {"type": "string", "default": "scope",
+                          "description": "metadata key used as the physical partition key"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": False,
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_list_collections",
@@ -822,7 +838,8 @@ TOOLS = [
                      "collection exists and gauge its size. Required: collection. Fails when the "
                      "collection does not exist."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string"}}},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection in the active store"}}},
      "annotations": {"readOnlyHint": True, "destructiveHint": False,
                      "idempotentHint": True, "openWorldHint": False}},
 
@@ -837,10 +854,19 @@ TOOLS = [
                      "object per text) and partition_by (default 'scope'; the collection is "
                      "auto-created when absent). Fails on ids/texts length mismatch."),
      "inputSchema": {"type": "object", "required": ["collection", "texts", "ids"], "properties": {
-         "collection": {"type": "string"}, "texts": {"type": "array", "items": {"type": "string"}},
-         "ids": {"type": "array", "items": {"type": "string"}},
-         "metadata": {"type": "array", "items": {"type": "object"}},
-         "partition_by": {"type": "string", "default": "scope"}}},
+         "collection": {"type": "string",
+                        "description": "target collection; auto-created (with partition_by) when "
+                        "absent"},
+         "texts": {"type": "array", "items": {"type": "string"},
+                   "description": "documents to embed on-device; one row per text"},
+         "ids": {"type": "array", "items": {"type": "string"},
+                 "description": "external ids, one per text; new ids insert, existing ids are "
+                 "replaced"},
+         "metadata": {"type": "array", "items": {"type": "object"},
+                      "description": "one object per text positionally; the partition key is "
+                      "defaulted when omitted"},
+         "partition_by": {"type": "string", "default": "scope",
+                          "description": "partition key used when auto-creating the collection"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": False,
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_update",
@@ -852,9 +878,15 @@ TOOLS = [
                      "defaulted when omitted). Fails when the collection does not exist or on "
                      "ids/texts length mismatch."),
      "inputSchema": {"type": "object", "required": ["collection", "texts", "ids"], "properties": {
-         "collection": {"type": "string"}, "texts": {"type": "array", "items": {"type": "string"}},
-         "ids": {"type": "array", "items": {"type": "string"}},
-         "metadata": {"type": "array", "items": {"type": "object"}}}},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection in the active store"},
+         "texts": {"type": "array", "items": {"type": "string"},
+                   "description": "replacement texts, embedded on-device; one per id"},
+         "ids": {"type": "array", "items": {"type": "string"},
+                 "description": "external ids of EXISTING rows to replace (strict: required)"},
+         "metadata": {"type": "array", "items": {"type": "object"},
+                      "description": "one object per text positionally; the partition key is "
+                      "defaulted when omitted"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": False,
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_delete",
@@ -864,27 +896,41 @@ TOOLS = [
                      "Repeating the same delete is a no-op. Fails when the collection does not "
                      "exist."),
      "inputSchema": {"type": "object", "required": ["collection", "ids"], "properties": {
-         "collection": {"type": "string"}, "ids": {"type": "array", "items": {"type": "string"}}}},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection in the active store"},
+         "ids": {"type": "array", "items": {"type": "string"},
+                 "description": "external ids to tombstone"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": True,
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_ids",
      "description": ("Return the live (non-tombstoned) external ids in a collection, optionally "
-                     "scoped by a where filter. Use to enumerate what is stored before a bulk "
-                     "update or delete. Required: collection. Optional: where — a single-key "
-                     "equality filter such as scope=project:acme (one key only). Fails when the "
+                     "scoped by a where filter — enumeration without ranking. Siblings: "
+                     "telys_search returns ranked hits with scores for a query; telys_count "
+                     "returns just the cardinality. Required: collection. Optional: where — a "
+                     "single-key equality filter such as scope=project:acme (one key only). "
+                     "Result: the full id list in a single response (no pagination); the order is "
+                     "the engine's internal row order — neither sorted nor insertion order — so "
+                     "sort client-side when a stable display order matters. Fails when the "
                      "collection does not exist or when `where` carries more than one key."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string"}, "where": _WHERE_SCHEMA}},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection in the active store"},
+         "where": _WHERE_SCHEMA}},
      "annotations": {"readOnlyHint": True, "destructiveHint": False,
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_count",
-     "description": ("Return the live row count (post-tombstone) for a collection, optionally "
-                     "where-scoped. Use for a cheap size check without pulling the full id list. "
-                     "Required: collection. Optional: where — a single-key equality filter (one "
-                     "key only). Fails when the collection does not exist or when `where` carries "
-                     "more than one key."),
+     "description": ("Return the live row count (post-tombstone) for a collection — cardinality "
+                     "only, optionally where-scoped. Siblings: telys_stats for aggregate stats "
+                     "(partition key, live id count, runtime index counters); telys_ids to "
+                     "enumerate the ids themselves. Required: collection — the name of an "
+                     "existing collection in the active store; the call fails when it does not "
+                     "exist (write first via telys_add or telys_create_collection). Optional: "
+                     "where — a single-key equality filter (one key only); more than one key "
+                     "fails."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string"}, "where": _WHERE_SCHEMA}},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection in the active store"},
+         "where": _WHERE_SCHEMA}},
      "annotations": {"readOnlyHint": True, "destructiveHint": False,
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_get",
@@ -897,8 +943,12 @@ TOOLS = [
                      "repo-index rows). Unknown ids come back as found:false, not an error; fails "
                      "only when the collection does not exist."),
      "inputSchema": {"type": "object", "required": ["collection", "ids"], "properties": {
-         "collection": {"type": "string"}, "ids": {"type": "array", "items": {"type": "string"}},
-         "with_metadata": {"type": "boolean", "default": True},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection in the active store"},
+         "ids": {"type": "array", "items": {"type": "string"},
+                 "description": "external ids to look up exactly (no similarity search)"},
+         "with_metadata": {"type": "boolean", "default": True,
+                           "description": "include stored metadata for found rows"},
          "with_text": {"type": "boolean", "default": True,
                        "description": "re-read the source slice for repo-index rows"}}},
      "annotations": {"readOnlyHint": True, "destructiveHint": False,
@@ -914,9 +964,14 @@ TOOLS = [
                      "(default false; include per-hit score explanations). Fails when the "
                      "collection does not exist or the lexical index was never built."),
      "inputSchema": {"type": "object", "required": ["collection", "query"], "properties": {
-         "collection": {"type": "string"}, "query": {"type": "string"},
-         "top_k": {"type": "integer", "default": 5},
-         "where": _WHERE_SCHEMA, "explain": {"type": "boolean", "default": False}}},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection created with lexical=True"},
+         "query": {"type": "string", "description": "keyword query for BM25 matching"},
+         "top_k": {"type": "integer", "default": 5,
+                   "description": "maximum hits to return, ordered best-first"},
+         "where": _WHERE_SCHEMA,
+         "explain": {"type": "boolean", "default": False,
+                     "description": "include per-hit score explanations"}}},
      "annotations": {"readOnlyHint": True, "destructiveHint": False,
                      "idempotentHint": True, "openWorldHint": False}},
 
@@ -928,21 +983,28 @@ TOOLS = [
                      "Repeating with no pending changes is a no-op. Fails when the collection "
                      "does not exist."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string"}}},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection in the active store"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": True,
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_build_ivf",
      "description": ("Build per-partition IVF indexes and calibrate nprobe to a recall floor — "
-                     "speeds up search on large partitions (small partitions already use exact "
-                     "scans). Run once a partition grows large. Required: collection. Optional: "
-                     "min_rows (default 20000; partitions below this stay exact) and "
-                     "target_recall (default 0.98). Fails when the collection does not exist; "
-                     "needs the optional faiss dependency — the error names the fix (pipx: `pipx "
-                     "inject telys faiss-cpu`; venv: `pip install faiss-cpu`)."),
+                     "approximate search for partitions that have outgrown exact scans. "
+                     "Maintenance sibling of telys_compact (physically reclaim space from "
+                     "deletes) and telys_tune (plan and optionally apply tuning automatically). "
+                     "Required: collection. Optional: min_rows (default 20000; only partitions "
+                     "with at least this many rows get an IVF index — smaller ones keep exact "
+                     "scans) and target_recall (default 0.98). Fails when the collection does not "
+                     "exist; needs the optional faiss dependency — the error names the fix (pipx: "
+                     "`pipx inject telys faiss-cpu`; venv: `pip install faiss-cpu`)."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string"},
-         "min_rows": {"type": "integer", "default": 20000},
-         "target_recall": {"type": "number", "default": 0.98}}},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection in the active store"},
+         "min_rows": {"type": "integer", "default": 20000,
+                      "description": "only partitions with at least this many rows get an IVF "
+                      "index (smaller stay exact)"},
+         "target_recall": {"type": "number", "default": 0.98,
+                           "description": "recall floor the nprobe calibration targets"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": False,
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_build_lexical",
@@ -952,8 +1014,11 @@ TOOLS = [
                      "Optional: k1 (default 1.8; term-frequency saturation) and b (default 1.0; "
                      "document-length normalization). Fails when the collection does not exist."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string"},
-         "k1": {"type": "number", "default": 1.8}, "b": {"type": "number", "default": 1.0}}},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection created with lexical=True"},
+         "k1": {"type": "number", "default": 1.8, "description": "BM25 term-frequency saturation"},
+         "b": {"type": "number", "default": 1.0,
+               "description": "BM25 document-length normalization"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": False,
                      "idempotentHint": True, "openWorldHint": False}},
     {"name": "telys_tune",
@@ -963,9 +1028,11 @@ TOOLS = [
                      "always applies, omit for the tuner default. Fails when the collection does "
                      "not exist."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string"},
+         "collection": {"type": "string",
+                        "description": "name of an existing collection in the active store"},
          "dry_run": {"type": "boolean",
-                     "description": "true never applies, false always applies, omit = tuner default"}}},
+                     "description": "true never applies, false always applies, omit = tuner "
+                     "default"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": False,
                      "idempotentHint": False, "openWorldHint": False}},
 
@@ -984,14 +1051,24 @@ TOOLS = [
                      "not a directory or the collection already exists with a partition key other "
                      "than repo_id."),
      "inputSchema": {"type": "object", "properties": {
-         "path": {"type": "string", "description": "repo root (defaults to server workspace / CWD)"},
-         "collection": {"type": "string", "default": _INDEX_COLLECTION_DEFAULT},
-         "mode": {"type": "string", "enum": ["file", "windowed"], "default": "windowed"},
-         "window_lines": {"type": "integer", "default": _DEFAULT_WINDOW_LINES},
-         "window_overlap_lines": {"type": "integer", "default": _DEFAULT_WINDOW_OVERLAP},
-         "max_file_bytes": {"type": "integer", "default": _DEFAULT_MAX_FILE_BYTES},
-         "max_files": {"type": "integer", "default": _DEFAULT_MAX_FILES},
-         "max_seconds": {"type": "integer", "default": _DEFAULT_MAX_SECONDS},
+         "path": {"type": "string",
+                  "description": "repo root (defaults to server workspace / CWD)"},
+         "collection": {"type": "string", "default": _INDEX_COLLECTION_DEFAULT,
+                        "description": "target collection for the repo chunks (auto-created with "
+                        "partition_by='repo_id')"},
+         "mode": {"type": "string", "enum": ["file", "windowed"], "default": "windowed",
+                  "description": "'windowed' sliding line window or 'file' (one record per file)"},
+         "window_lines": {"type": "integer", "default": _DEFAULT_WINDOW_LINES,
+                          "description": "lines per chunk in windowed mode"},
+         "window_overlap_lines": {"type": "integer", "default": _DEFAULT_WINDOW_OVERLAP,
+                                  "description": "overlap lines between consecutive windows"},
+         "max_file_bytes": {"type": "integer", "default": _DEFAULT_MAX_FILE_BYTES,
+                            "description": "skip files larger than this many bytes; 0 = "
+                            "unlimited"},
+         "max_files": {"type": "integer", "default": _DEFAULT_MAX_FILES,
+                       "description": "stop after walking this many files; 0 = unlimited"},
+         "max_seconds": {"type": "integer", "default": _DEFAULT_MAX_SECONDS,
+                         "description": "wall-clock budget in seconds; 0 = unlimited"},
          "force": {"type": "boolean", "default": False,
                    "description": "ignore the fingerprint cache and rebuild every file"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": False,
@@ -1009,7 +1086,10 @@ TOOLS = [
                      "telys_index_repo with an explicit path first. Note: the freshness re-index "
                      "writes to the store, so this is not a read-only tool."),
      "inputSchema": {"type": "object", "required": ["query"], "properties": {
-         "query": {"type": "string"}, "top_k": {"type": "integer", "default": 5},
+         "query": {"type": "string",
+                   "description": "text query; embedded on-device before searching"},
+         "top_k": {"type": "integer", "default": 5,
+                   "description": "maximum hits to return, ordered best-first"},
          "path_hint": {"type": "string",
                        "description": "exact path (relative to repo root) to scope the search"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": False,
