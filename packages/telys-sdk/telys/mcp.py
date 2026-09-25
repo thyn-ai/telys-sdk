@@ -1032,15 +1032,21 @@ TOOLS = [
      "description": ("Produce a TuningPlan for a collection via its Tuner, and optionally apply "
                      "it. Use to inspect or apply index/maintenance recommendations. Sibling: "
                      "telys_build_ivf builds the IVF index directly; this tool plans and "
-                     "optionally applies tuning. Required: collection. Optional: dry_run — true "
-                     "never applies (plan only), false always applies, omit for the tuner "
-                     "default. Fails when the collection does not exist."),
+                     "optionally applies tuning. Applying (dry_run=false) sets the default "
+                     "target recall + exact↔quantized crossover and IVF-builds oversized "
+                     "partitions (already-built ones are skipped) — instant settings plus a "
+                     "faiss-requiring build that grows with partition size, applied live "
+                     "in-process (this handler does not persist to disk) and not atomically, "
+                     "so a mid-apply failure can leave earlier settings in place. Verify the "
+                     "after-state with telys_stats. Required: collection. Optional: dry_run "
+                     "(plan-only vs apply; values on the parameter). Fails when the "
+                     "collection does not exist."),
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {
          "collection": {"type": "string",
                         "description": "name of an existing collection in the active store"},
          "dry_run": {"type": "boolean",
-                     "description": "true never applies, false always applies, omit = tuner "
-                     "default"}}},
+                     "description": "true = return the plan only; false = plan + apply; "
+                     "omit = the tuner's default"}}},
      "annotations": {"readOnlyHint": False, "destructiveHint": False,
                      "idempotentHint": False, "openWorldHint": False}},
 
