@@ -1,4 +1,4 @@
-# telys
+# Telys
 
 <!-- mcp-name: io.github.thyn-ai/telys -->
 
