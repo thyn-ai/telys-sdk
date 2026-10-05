@@ -167,17 +167,35 @@ def device_authorize(*, accounts: str, open_browser: bool = True, max_wait: floa
     raise LoginError("timed out waiting for device authorization")
 
 
-# ── control-plane calls (match decision-engine: POST /v1/telys/onboard, POST /v1/device/register) ────────────
+# ── control-plane calls (match decision-engine: POST /v1/products/telys/onboard, POST /v1/device/register) ──
+
+def _server_error_suffix(resp: dict) -> str:
+    """` [<code>]: <message>` from the control plane's `{"error": {"code", "message"}}` envelope; "" when the
+    body carries neither (e.g. an edge/proxy error page that is not JSON)."""
+    err = resp.get("error")
+    if not isinstance(err, dict):
+        return ""
+    code, detail = err.get("code"), err.get("message")
+    suffix = ""
+    if code:
+        suffix += f" [{code}]"
+    if detail:
+        suffix += f": {detail}"
+    return suffix
+
 
 def create_api_key(*, api: str, access_token: str, plan: str) -> str:
-    # Supabase-JWT entry point: /v1/telys/onboard resolves-or-creates the org on the free telys_developer tier
-    # (so the device license carries products.telys) AND mints the first API key. (POST /v1/api-keys does NOT
-    # accept a Supabase JWT — it requires an existing API key/license — which is why onboarding has its own route.)
-    status, resp = _request("POST", f"{api}/v1/telys/onboard", bearer=access_token,
+    # Supabase-JWT entry point: /v1/products/telys/onboard resolves-or-creates the org on the free
+    # telys_developer tier (so the device license carries products.telys) AND mints the first API key. (POST
+    # /v1/api-keys does NOT accept a Supabase JWT — it requires an existing API key/license — which is why
+    # onboarding has its own route.)
+    status, resp = _request("POST", f"{api}/v1/products/telys/onboard", bearer=access_token,
                             body={"name": "telys-cli", "product": "telys", "plan": plan})
     key = resp.get("raw_key") or resp.get("key") or resp.get("api_key")
     if status >= 400 or not key:
-        raise LoginError(f"could not create API key (HTTP {status})")
+        # Surface the server's structured error so users can act on it (e.g. 409 org_membership_required,
+        # 403 membership_inactive) — a bare "HTTP 409" says nothing about the cause.
+        raise LoginError(f"could not create API key (HTTP {status}){_server_error_suffix(resp)}")
     return key
 
 
@@ -196,15 +214,7 @@ def register_device(*, api: str, api_key: str) -> str:
         # Surface the server's structured error code so users can act on it:
         # local_runtime_not_included / device_platform_required / device_fingerprint_required /
         # device_key_mismatch — see decision-engine apps/api_server/routers/devices.py:164-208 + :299-312.
-        err = resp.get("error") if isinstance(resp, dict) else None
-        detail = (err or {}).get("message") if isinstance(err, dict) else None
-        code = (err or {}).get("code") if isinstance(err, dict) else None
-        suffix = ""
-        if code:
-            suffix += f" [{code}]"
-        if detail:
-            suffix += f": {detail}"
-        raise LoginError(f"device registration failed (HTTP {status}){suffix}")
+        raise LoginError(f"device registration failed (HTTP {status}){_server_error_suffix(resp)}")
     return license_token
 
 
