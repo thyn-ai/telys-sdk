@@ -39,6 +39,8 @@ telys = "telys.cli:main"
 [project.urls]
 Homepage = "https://telys.ai"
 Documentation = "https://docs.telys.ai"
+Source = "https://github.com/thyn-ai/telys-sdk"
+Issues = "https://github.com/thyn-ai/telys-sdk/issues"
 Changelog = "https://docs.telys.ai/changelog"
 Company = "https://thyn.ai"
 
