@@ -5,6 +5,8 @@
 **Public SDK** for **Telys** — embedded, on-device memory & retrieval. In-process, **zero cloud
 roundtrips** at query time.
 
+> ⭐ If Telys saved you time, a [star on GitHub](https://github.com/thyn-ai/telys-sdk) helps others find it.
+
 This package contains the complete developer-facing surface: the `Telys`/`Collection` facades, query/filter
 types, the `EmbeddingProvider` interface, the `Tuner`/`TuningPlan` interfaces, the **full MCP server**
 (`telys/mcp.py` — 19 tools, protocol 2025-06-18, stdio), a runtime loader, and the `telys` CLI. The
