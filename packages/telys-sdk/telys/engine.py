@@ -439,6 +439,16 @@ class Telys:
         idx = self._runtime.open_compact(path)
         return CompactCollection(self, idx, embedder)
 
+    def blob_store(self, namespace: str = "default"):
+        """Return a named `BlobStore` rooted under this engine's directory.
+
+        Blob stores are isolated by namespace, durable across restarts, and do not use the vector runtime.
+        Use them for opaque binary payloads that need sub-millisecond put/get.
+        """
+        from telys.blob import BlobStore
+
+        return BlobStore(os.path.join(self.path, ".blobs", namespace))
+
     def collections(self) -> list:
         return sorted(n for n in os.listdir(self.path)
                       if os.path.exists(os.path.join(self.path, n, "collection.json")))
