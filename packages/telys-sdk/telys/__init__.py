@@ -62,12 +62,23 @@ def _ambient_engine_present() -> bool:
 
 _activate_installed_runtime()
 
-from telys.engine import AME, Telys, FORMAT_VERSION, __version__, scope_key  # noqa: F401,E402
-from telys.filters import Eq  # noqa: F401,E402
-from telys.tuning import Tuner, TuningPlan  # noqa: F401,E402  (HeuristicTuner is lazy — see __getattr__)
+from telys.blob import BlobStore
+from telys.engine import AME, FORMAT_VERSION, Telys, __version__, scope_key
+from telys.filters import Eq
+from telys.tuning import Tuner, TuningPlan
 
-__all__ = ["Telys", "AME", "Eq", "scope_key", "Tuner", "HeuristicTuner", "TuningPlan",
-           "__version__", "FORMAT_VERSION"]
+__all__ = [
+    "AME",
+    "FORMAT_VERSION",
+    "BlobStore",
+    "Eq",
+    "HeuristicTuner",
+    "Telys",
+    "Tuner",
+    "TuningPlan",
+    "__version__",
+    "scope_key",
+]
 
 
 def __getattr__(name):
