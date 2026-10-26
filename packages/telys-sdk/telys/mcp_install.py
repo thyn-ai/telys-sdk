@@ -8,6 +8,7 @@ Prefers a client's own CLI when it owns a file that also holds non-MCP state (Cl
 Codex's config.toml); otherwise merges the MCP-only config file directly (idempotent, with a .bak backup).
 Stdlib only — no third-party deps ship in the public SDK.
 """
+
 from __future__ import annotations
 
 import json
@@ -20,12 +21,18 @@ _SERVER_ARGS = ["mcp"]
 
 
 def _command() -> str:
-    """The command a client should launch. Prefer bare `telys` (on PATH via pipx/pip); fall back to this
-    interpreter's console script, then `python -m telys.cli`-style, so it works even off-PATH."""
-    if shutil.which("telys"):
-        return "telys"
-    cand = os.path.join(os.path.dirname(sys.executable), "telys")
-    return cand if os.path.exists(cand) else "telys"
+    """The absolute-path command a client should launch.
+
+    GUI hosts (Claude Desktop, Cursor) often start with a minimal PATH that does not include
+    ~/.local/bin, so a bare `telys` fails. We always write the resolved absolute path: the `telys`
+    on PATH if there is one, otherwise the console script next to this interpreter (the pipx venv
+    layout).
+    """
+    found = shutil.which("telys")
+    if found:
+        return os.path.abspath(found)
+    exe = "telys.exe" if sys.platform.startswith("win") else "telys"
+    return os.path.join(os.path.dirname(sys.executable), exe)
 
 
 def _entry_json(name: str, *, stdio_type: bool) -> dict:
@@ -86,12 +93,20 @@ def _claude_desktop_config() -> str:
     if sys.platform == "darwin":
         return _home("Library", "Application Support", "Claude", "claude_desktop_config.json")
     if sys.platform.startswith("win"):
-        return os.path.join(os.environ.get("APPDATA", _home("AppData", "Roaming")), "Claude", "claude_desktop_config.json")
+        return os.path.join(
+            os.environ.get("APPDATA", _home("AppData", "Roaming")),
+            "Claude",
+            "claude_desktop_config.json",
+        )
     return _home(".config", "Claude", "claude_desktop_config.json")
 
 
 def _cursor_config(scope: str) -> str:
-    return os.path.join(os.getcwd(), ".cursor", "mcp.json") if scope == "project" else _home(".cursor", "mcp.json")
+    return (
+        os.path.join(os.getcwd(), ".cursor", "mcp.json")
+        if scope == "project"
+        else _home(".cursor", "mcp.json")
+    )
 
 
 def _claude_project_config() -> str:
@@ -99,11 +114,19 @@ def _claude_project_config() -> str:
 
 
 def _codex_config(scope: str) -> str:
-    return os.path.join(os.getcwd(), ".codex", "config.toml") if scope == "project" else _home(".codex", "config.toml")
+    return (
+        os.path.join(os.getcwd(), ".codex", "config.toml")
+        if scope == "project"
+        else _home(".codex", "config.toml")
+    )
 
 
 def _qwen_config(scope: str) -> str:
-    return os.path.join(os.getcwd(), ".qwen", "settings.json") if scope == "project" else _home(".qwen", "settings.json")
+    return (
+        os.path.join(os.getcwd(), ".qwen", "settings.json")
+        if scope == "project"
+        else _home(".qwen", "settings.json")
+    )
 
 
 def _detect_clients() -> list[str]:
@@ -126,7 +149,22 @@ def _install_claude(name: str, scope: str) -> str:
     # User scope: ~/.claude.json holds lots of non-MCP state — use the official CLI (owns the file). Project
     # scope: a clean MCP-only .mcp.json in the repo (safe to write directly).
     if scope == "user" and shutil.which("claude"):
-        subprocess.run(["claude", "mcp", "add", "--transport", "stdio", "--scope", "user", name, "--", _command(), *_SERVER_ARGS], check=True)
+        subprocess.run(
+            [
+                "claude",
+                "mcp",
+                "add",
+                "--transport",
+                "stdio",
+                "--scope",
+                "user",
+                name,
+                "--",
+                _command(),
+                *_SERVER_ARGS,
+            ],
+            check=True,
+        )
         return "claude (user, via `claude mcp add`)"
     path = _claude_project_config()
     _merge_json_mcp(path, name, _entry_json(name, stdio_type=True))
@@ -157,8 +195,11 @@ def _install_codex(name: str, scope: str) -> str:
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
             existing = fh.read()
-    block = (f'\n[mcp_servers.{name}]\ncommand = "{_command()}"\nargs = ['
-             + ", ".join(f'"{a}"' for a in _SERVER_ARGS) + "]\n")
+    block = (
+        f'\n[mcp_servers.{name}]\ncommand = "{_command()}"\nargs = ['
+        + ", ".join(f'"{a}"' for a in _SERVER_ARGS)
+        + "]\n"
+    )
     if f"[mcp_servers.{name}]" in existing:
         return f"codex → {path} (already present; left as-is)"
     with open(path, "a", encoding="utf-8") as fh:
@@ -194,16 +235,21 @@ _INSTALLERS = {
 
 def install(*, client: str = "all", scope: str = "user", name: str = "telys") -> int:
     clients = _detect_clients() if client == "all" else [client]
-    print(f"registering the Telys MCP server ({_command()} {' '.join(_SERVER_ARGS)}) — no env, self-locating runtime")
+    print(
+        f"registering the Telys MCP server ({_command()} {' '.join(_SERVER_ARGS)}) — no env, self-locating runtime"
+    )
     rc = 0
     for c in clients:
         fn = _INSTALLERS.get(c)
         if not fn:
-            print(f"  [skip] unknown client: {c}"); rc = 1; continue
+            print(f"  [skip] unknown client: {c}")
+            rc = 1
+            continue
         try:
             print(f"  ✓ {fn(name, scope)}")
         except Exception as exc:  # noqa: BLE001
-            print(f"  ✗ {c}: {exc}"); rc = 1
+            print(f"  ✗ {c}: {exc}")
+            rc = 1
     print("done. Restart/reload the client, then ask it to use `telys_search` / `telys_add`.")
     print("(Telys memory needs the runtime — run `telys login` once if you haven't.)")
     return rc
@@ -213,25 +259,41 @@ def uninstall(*, client: str = "all", scope: str = "user", name: str = "telys") 
     clients = _detect_clients() if client == "all" else [client]
     for c in clients:
         if c == "claude" and scope == "user" and shutil.which("claude"):
-            subprocess.run(["claude", "mcp", "remove", name], check=False); print(f"  ✓ claude (user): removed {name}"); continue
-        paths = {"claude": _claude_project_config(), "cursor": _cursor_config(scope),
-                 "claude-desktop": _claude_desktop_config(), "codex": _codex_config(scope),
-                 "qwen": _qwen_config(scope)}
+            subprocess.run(["claude", "mcp", "remove", name], check=False)
+            print(f"  ✓ claude (user): removed {name}")
+            continue
+        paths = {
+            "claude": _claude_project_config(),
+            "cursor": _cursor_config(scope),
+            "claude-desktop": _claude_desktop_config(),
+            "codex": _codex_config(scope),
+            "qwen": _qwen_config(scope),
+        }
         p = paths.get(c)
         if c == "codex":
-            print(f"  [manual] remove the [mcp_servers.{name}] block from {p}"); continue
-        print(f"  {'✓ removed from' if p and _remove_json_mcp(p, name) else '· not present in'} {p}")
+            print(f"  [manual] remove the [mcp_servers.{name}] block from {p}")
+            continue
+        print(
+            f"  {'✓ removed from' if p and _remove_json_mcp(p, name) else '· not present in'} {p}"
+        )
     return 0
 
 
 def status(*, name: str = "telys") -> int:
     print(f"Telys MCP command: {_command()} {' '.join(_SERVER_ARGS)}")
-    checks = {"claude (project)": _claude_project_config(), "cursor (user)": _cursor_config("user"),
-              "claude-desktop": _claude_desktop_config(), "codex (user)": _codex_config("user"),
-              "qwen (user)": _qwen_config("user")}
+    checks = {
+        "claude (project)": _claude_project_config(),
+        "cursor (user)": _cursor_config("user"),
+        "claude-desktop": _claude_desktop_config(),
+        "codex (user)": _codex_config("user"),
+        "qwen (user)": _qwen_config("user"),
+    }
     for label, path in checks.items():
         present = name in (_load_json(path).get("mcpServers", {}) if path.endswith(".json") else {})
         if path.endswith(".toml"):
-            present = os.path.exists(path) and f"[mcp_servers.{name}]" in open(path, encoding="utf-8").read()
+            present = (
+                os.path.exists(path)
+                and f"[mcp_servers.{name}]" in open(path, encoding="utf-8").read()
+            )
         print(f"  {'registered' if present else 'not registered':14} {label}: {path}")
     return 0

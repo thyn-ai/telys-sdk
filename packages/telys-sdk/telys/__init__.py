@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 """Telys — embedded, on-device memory & retrieval SDK (public, thin).
 
     from telys import Telys, Eq, scope_key
@@ -13,6 +14,8 @@ This is the public SDK: facades, types, and provider/tuner interfaces only — n
 engine is a separate, closed, on-device runtime loaded on first use (`telys runtime install`; see D-30).
 `telys turns filtered vector search into a contiguous memory operation.`
 """
+
+
 def _activate_installed_runtime() -> None:
     """Zero-config runtime: after a VERIFIED `telys runtime install`, add the installed runtime's Python package
     dir (pysite, from the signed bundle's slim telys-runtime-native wheel) to sys.path — so the native engine and
@@ -63,8 +66,9 @@ def _ambient_engine_present() -> bool:
 _activate_installed_runtime()
 
 from telys.blob import BlobStore
-from telys.engine import AME, FORMAT_VERSION, Telys, __version__, scope_key
+from telys.engine import AME, Telys, __version__, scope_key
 from telys.filters import Eq
+from telys.runtime import FORMAT_VERSION
 from telys.tuning import Tuner, TuningPlan
 
 __all__ = [
@@ -86,5 +90,6 @@ def __getattr__(name):
     # engine, while `from telys import HeuristicTuner` keeps working when the runtime is installed.
     if name == "HeuristicTuner":
         from telys.tuning import HeuristicTuner
+
         return HeuristicTuner
     raise AttributeError(f"module 'telys' has no attribute {name!r}")
