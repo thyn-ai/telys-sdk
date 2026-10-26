@@ -526,10 +526,7 @@ class Collection:
             self._rt.attach_embedder(self.idx, embedder)
             self.embedder = embedder
         if self.lexical:  # rebuild the per-partition BM25 from persisted tokens
-            try:
-                self._rt.build_lexical(self.idx)
-            except NotImplementedError:  # native runtime: dense still opens, lexical inert
-                pass
+            self._rt.build_lexical(self.idx)
         return self
 
 
