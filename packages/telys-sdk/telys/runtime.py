@@ -5,6 +5,7 @@ implementation (`LocalRuntime`, wrapping the in-process engine today; a native r
 ships in the closed `telys-runtime` package and is resolved lazily by `load_runtime()`. `import telys` never
 imports the engine — it is loaded the first time you create/open a collection (D-30).
 """
+
 from __future__ import annotations
 
 import json
@@ -14,6 +15,10 @@ from pathlib import Path
 # Public on-disk format contract. The runtime asserts its engine matches this; bump deliberately.
 FORMAT_VERSION = 1
 
+# Reserved off-key column used when a collection opts to retain the raw text of ingested documents.
+# It is hidden from metadata queries (columns_for) and exposed only through texts_for().
+TEXT_COLUMN = "__telys_text__"
+
 
 class RuntimeHandle:
     """Stable interface between the Telys SDK facade and the engine. All ops take the opaque index handle as
@@ -22,48 +27,92 @@ class RuntimeHandle:
     FORMAT_VERSION = FORMAT_VERSION
 
     # lifecycle
-    def new_index(self, dim, dtype): raise NotImplementedError
-    def open_index(self, path): raise NotImplementedError
-    def save(self, index, path): raise NotImplementedError
-    def sealed(self, index) -> bool: raise NotImplementedError
+    def new_index(self, dim, dtype):
+        raise NotImplementedError
+
+    def open_index(self, path):
+        raise NotImplementedError
+
+    def save(self, index, path):
+        raise NotImplementedError
+
+    def sealed(self, index) -> bool:
+        raise NotImplementedError
 
     # ingest
-    def attach_embedder(self, index, embedder): raise NotImplementedError
-    def build(self, index, vecs, iids, keys, key_name, columns, texts=None): raise NotImplementedError
-    def insert(self, index, vecs, iids, keys, columns, texts=None): raise NotImplementedError
-    def update(self, index, iids, vecs, keys, columns, texts=None): raise NotImplementedError
+    def attach_embedder(self, index, embedder):
+        raise NotImplementedError
+
+    def build(self, index, vecs, iids, keys, key_name, columns, texts=None):
+        raise NotImplementedError
+
+    def insert(self, index, vecs, iids, keys, columns, texts=None):
+        raise NotImplementedError
+
+    def update(self, index, iids, vecs, keys, columns, texts=None):
+        raise NotImplementedError
 
     # query
-    def search(self, index, vector, top_k, where, explain, target_recall): raise NotImplementedError
-    def columns_for(self, index, ids): raise NotImplementedError
-    def live_ids(self, index, where): raise NotImplementedError
+    def search(self, index, vector, top_k, where, explain, target_recall):
+        raise NotImplementedError
+
+    def columns_for(self, index, ids):
+        raise NotImplementedError
+
+    def texts_for(self, index, ids):
+        raise NotImplementedError
+
+    def live_ids(self, index, where):
+        raise NotImplementedError
 
     # lexical (on-device BM25 code index; build after ingest, query with mode="lexical")
-    def build_lexical(self, index, k1=1.8, b=1.0): raise NotImplementedError
-    def search_lexical(self, index, text, top_k, where, explain): raise NotImplementedError
+    def build_lexical(self, index, k1=1.8, b=1.0):
+        raise NotImplementedError
+
+    def search_lexical(self, index, text, top_k, where, explain):
+        raise NotImplementedError
 
     # maintain
-    def delete(self, index, iids): raise NotImplementedError
-    def compact(self, index): raise NotImplementedError
-    def snapshot(self, index): raise NotImplementedError
-    def stats(self, index) -> dict: raise NotImplementedError
+    def delete(self, index, iids):
+        raise NotImplementedError
+
+    def compact(self, index):
+        raise NotImplementedError
+
+    def snapshot(self, index):
+        raise NotImplementedError
+
+    def stats(self, index) -> dict:
+        raise NotImplementedError
 
     # compact serve artifacts (ultra-small READ-ONLY export: quantized slab + remap + provenance
     # columns; no f32 base, no external id map, no lexical tokens — the "ship the index" tier)
-    def export_compact(self, index, path, mode): raise NotImplementedError
-    def open_compact(self, path): raise NotImplementedError
+    def export_compact(self, index, path, mode):
+        raise NotImplementedError
+
+    def open_compact(self, path):
+        raise NotImplementedError
 
     # physical tuning state (driven by Collection.apply_tuning; max_nprobe exposed for governed tuners)
-    def build_partition_ivf(self, index, min_rows, target_recall, max_nprobe=64): raise NotImplementedError
-    def set_exact_crossover(self, index, rows): raise NotImplementedError
-    def partition_ivf_keys(self, index): raise NotImplementedError
-    def set_partition_nprobe(self, index, key, nprobe): raise NotImplementedError
+    def build_partition_ivf(self, index, min_rows, target_recall, max_nprobe=64):
+        raise NotImplementedError
+
+    def set_exact_crossover(self, index, rows):
+        raise NotImplementedError
+
+    def partition_ivf_keys(self, index):
+        raise NotImplementedError
+
+    def set_partition_nprobe(self, index, key, nprobe):
+        raise NotImplementedError
 
     # default zero-config tuner (HeuristicTuner — a closed-runtime impl)
-    def default_tuner(self): raise NotImplementedError
+    def default_tuner(self):
+        raise NotImplementedError
 
     # diagnostics — where the native kernel resolves from (so the SDK/CLI never imports engine internals)
-    def kernel_info(self) -> dict: raise NotImplementedError
+    def kernel_info(self) -> dict:
+        raise NotImplementedError
 
 
 class RuntimeNotInstalled(RuntimeError):
@@ -123,8 +172,8 @@ def load_runtime() -> RuntimeHandle:
             extra = (
                 " A verified runtime is installed but its native engine could not be loaded; the readable-Python "
                 "fallback is refused for verified installs (reinstall with `telys runtime install`)."
-                if verified else
-                " Run `telys runtime install` (or `pip install telys-runtime` for local dev)."
+                if verified
+                else " Run `telys runtime install` (or `pip install telys-runtime` for local dev)."
             )
             raise RuntimeNotInstalled(f"The native Telys runtime is unavailable.{extra}") from e
         return NativeRuntime()

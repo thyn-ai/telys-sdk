@@ -21,6 +21,7 @@ the closed runtime is loaded the first time you create/open a collection (D-30).
                            where={"scope_key": scope_key("acme/shop", "payments", "python")}, explain=True)
     col.save()                       # durable; Telys("./codna-memory").open_collection("repo_symbols") reopens
 """
+
 from __future__ import annotations
 
 import json
@@ -28,7 +29,10 @@ import os
 
 import numpy as np
 
-from telys.runtime import FORMAT_VERSION, load_runtime  # SDK↔engine seam (D-30); facade imports no engine
+from telys.runtime import (
+    TEXT_COLUMN,
+    load_runtime,
+)  # SDK↔engine seam (D-30); facade imports no engine
 
 # Single source of truth = the installed distribution version (pyproject). Falls back to a literal only for an
 # uninstalled source checkout, so `telys version` / telemetry can never drift from the published wheel.
@@ -51,31 +55,55 @@ def scope_key(*parts) -> str:
 class Collection:
     """One named, persisted vector collection with an external-id map, embedder, and metadata routing."""
 
-    def __init__(self, engine: "Telys", name: str, dim: int, partition_by, embedder=None,
-                 dtype: str = "f32", filter_columns=(), tuner=None, lexical: bool = False) -> None:
+    def __init__(
+        self,
+        engine: "Telys",
+        name: str,
+        dim: int,
+        partition_by,
+        embedder=None,
+        dtype: str = "f32",
+        filter_columns=(),
+        tuner=None,
+        lexical: bool = False,
+        store_text: bool = False,
+    ) -> None:
         self.engine = engine
         self.name = name
         self.dim = dim
         self.key_name = partition_by[0] if isinstance(partition_by, (list, tuple)) else partition_by
         self.dtype = dtype
         self.col_names = list(filter_columns)
-        self.lexical = lexical         # retain per-row tokens at ingest so build_lexical()/mode="lexical" work
+        self.lexical = (
+            lexical  # retain per-row tokens at ingest so build_lexical()/mode="lexical" work
+        )
+        self.store_text = (
+            store_text  # retain raw text for reads (independent of lexical token retention)
+        )
+        if TEXT_COLUMN in self.col_names:
+            raise ValueError(f"{TEXT_COLUMN!r} is a reserved column name")
         self.embedder = embedder
-        self._rt = engine._runtime                 # the SDK↔engine handle (loaded runtime)
-        self.tuner = tuner if tuner is not None else self._rt.default_tuner()  # HeuristicTuner (closed runtime)
-        self.default_target_recall = 1.0           # raised/lowered by apply_tuning()
+        self._rt = engine._runtime  # the SDK↔engine handle (loaded runtime)
+        self.tuner = (
+            tuner if tuner is not None else self._rt.default_tuner()
+        )  # HeuristicTuner (closed runtime)
+        self.default_target_recall = 1.0  # raised/lowered by apply_tuning()
         if embedder is not None and embedder.profile.dimension != dim:
             raise ValueError(f"embedder dim {embedder.profile.dimension} != collection dim {dim}")
-        self.idx = self._rt.new_index(dim, dtype)  # opaque engine handle; the facade never introspects it
-        self._id2int: dict = {}        # external id (str/int) -> internal dense int
-        self._int2id: list = []        # internal int -> external id
+        self.idx = self._rt.new_index(
+            dim, dtype
+        )  # opaque engine handle; the facade never introspects it
+        self._id2int: dict = {}  # external id (str/int) -> internal dense int
+        self._int2id: list = []  # internal int -> external id
         self._dir = os.path.join(engine.path, name)
 
     # ── external <-> internal id mapping (lets callers use "case-101" etc.) ────────────────────────
     def _to_int(self, ext) -> int:
         i = self._id2int.get(ext)
         if i is None:
-            i = len(self._int2id); self._id2int[ext] = i; self._int2id.append(ext)
+            i = len(self._int2id)
+            self._id2int[ext] = i
+            self._int2id.append(ext)
         return i
 
     def _ext(self, internal_ids):
@@ -105,36 +133,70 @@ class Collection:
         if vecs.ndim != 2 or vecs.shape[1] != self.dim:
             raise ValueError(f"vectors must be (n, {self.dim}); got shape {vecs.shape}")
         keys = np.array([m[self.key_name] for m in metadata])
-        if not self._rt.sealed(self.idx):                          # first batch seals the base
+
+        def _columns(mask=None):
+            cols = self._cols(metadata, mask)
+            if self.store_text and texts is not None:
+                cols[TEXT_COLUMN] = np.array(self._mask_texts(texts, mask), dtype=object)
+            return cols
+
+        if not self._rt.sealed(self.idx):  # first batch seals the base
             dup = [e for e in ext_ids if e in self._id2int]
             if dup and not upsert:
                 raise KeyError(f"ids already exist: {dup[:3]}")
             iids = np.array([self._to_int(e) for e in ext_ids], np.int64)
             if self.embedder is not None:
                 self._rt.attach_embedder(self.idx, self.embedder)
-            self._rt.build(self.idx, vecs, iids, keys, self.key_name, self._cols(metadata), texts=texts)
+            self._rt.build(
+                self.idx,
+                vecs,
+                iids,
+                keys,
+                self.key_name,
+                _columns(),
+                texts=texts if self.lexical else None,
+            )
             return self._ext(iids)
         new_mask = np.array([e not in self._id2int for e in ext_ids])
         if (~new_mask).any() and not upsert:
             dup = [ext_ids[i] for i in range(len(ext_ids)) if not new_mask[i]]
             raise KeyError(f"ids already exist (use upsert): {dup[:3]}")
         iids = np.array([self._to_int(e) for e in ext_ids], np.int64)
-        if new_mask.any():                                         # brand-new rows -> delta insert
-            self._rt.insert(self.idx, vecs[new_mask], iids[new_mask], keys[new_mask],
-                            self._cols(metadata, new_mask), texts=self._mask_texts(texts, new_mask))
-        if (~new_mask).any():                                      # existing ids -> versioned update
+        if new_mask.any():  # brand-new rows -> delta insert
+            self._rt.insert(
+                self.idx,
+                vecs[new_mask],
+                iids[new_mask],
+                keys[new_mask],
+                _columns(new_mask),
+                texts=texts if self.lexical else None,
+            )
+        if (~new_mask).any():  # existing ids -> versioned update
             ex = ~new_mask
-            self._rt.update(self.idx, iids[ex], vecs[ex], keys[ex], self._cols(metadata, ex),
-                            texts=self._mask_texts(texts, ex))
+            self._rt.update(
+                self.idx,
+                iids[ex],
+                vecs[ex],
+                keys[ex],
+                _columns(ex),
+                texts=texts if self.lexical else None,
+            )
         return self._ext(iids)
 
     def add_texts(self, texts, ids, metadata):
         """Add NEW rows (raises on any existing id)."""
         if self.embedder is None:
-            raise RuntimeError("no embedder attached — create_collection(..., embedder=...) or use add()")
+            raise RuntimeError(
+                "no embedder attached — create_collection(..., embedder=...) or use add()"
+            )
         tv = list(texts)
-        return self._ingest(self.embedder.embed_documents(tv), ids, metadata, upsert=False,
-                            texts=tv if self.lexical else None)
+        return self._ingest(
+            self.embedder.embed_documents(tv),
+            ids,
+            metadata,
+            upsert=False,
+            texts=tv if self.lexical or self.store_text else None,
+        )
 
     def add(self, vectors, ids, metadata):
         return self._ingest(vectors, ids, metadata, upsert=False)
@@ -144,18 +206,33 @@ class Collection:
         if self.embedder is None:
             raise RuntimeError("no embedder attached")
         tv = list(texts)
-        return self._ingest(self.embedder.embed_documents(tv), ids, metadata, upsert=True,
-                            texts=tv if self.lexical else None)
+        return self._ingest(
+            self.embedder.embed_documents(tv),
+            ids,
+            metadata,
+            upsert=True,
+            texts=tv if self.lexical or self.store_text else None,
+        )
 
     def upsert(self, vectors, ids, metadata):
         return self._ingest(vectors, ids, metadata, upsert=True)
 
     # ── query (returns external ids) ────────────────────────────────────────────────────────────────
-    def search(self, vector, top_k: int = 10, where=None, explain: bool = False,
-               target_recall: float | None = None, with_metadata: bool = False):
+    def search(
+        self,
+        vector,
+        top_k: int = 10,
+        where=None,
+        explain: bool = False,
+        target_recall: float | None = None,
+        with_metadata: bool = False,
+        with_text: bool = False,
+    ):
         # The runtime strides the query by the collection dim; reject a wrong-length query before the native call.
         if np.asarray(vector, np.float32).reshape(-1).shape[0] != self.dim:
-            raise ValueError(f"query vector must have length {self.dim}; got {np.asarray(vector).shape}")
+            raise ValueError(
+                f"query vector must have length {self.dim}; got {np.asarray(vector).shape}"
+            )
         tr = self.default_target_recall if target_recall is None else target_recall
         res = self._rt.search(self.idx, vector, top_k, where, explain, tr)
         if explain:
@@ -164,26 +241,57 @@ class Collection:
         else:
             ids, sc = res
             out = {"ids": self._ext(ids), "scores": sc.tolist()}
-        if with_metadata:                                  # provenance with the hit (the stored filter columns)
+        if with_metadata:  # provenance with the hit (the stored filter columns)
             out["metadata"] = self._rt.columns_for(self.idx, ids)
+            for m in out["metadata"]:
+                m.pop(TEXT_COLUMN, None)
+        if with_text and self.store_text:  # raw text for memory rows (avoids a follow-up get)
+            out["text"] = self.texts_for(self._ext(ids))
         return out
 
-    def search_text(self, text, top_k: int = 10, where=None, explain: bool = False,
-                    target_recall: float | None = None, with_metadata: bool = False, mode: str = "dense"):
+    def search_text(
+        self,
+        text,
+        top_k: int = 10,
+        where=None,
+        explain: bool = False,
+        target_recall: float | None = None,
+        with_metadata: bool = False,
+        mode: str = "dense",
+        with_text: bool = False,
+    ):
         """mode="dense" (default): embed + filtered vector search. mode="lexical": on-device BM25 over the
         retained code tokens (no embedding), scoped by the same where filter. Requires build_lexical()."""
         if mode == "lexical":
-            return self._search_lexical(text, top_k, where=where, explain=explain, with_metadata=with_metadata)
+            return self._search_lexical(
+                text,
+                top_k,
+                where=where,
+                explain=explain,
+                with_metadata=with_metadata,
+                with_text=with_text,
+            )
         if self.embedder is None:
             raise RuntimeError("no embedder attached")
         qv = self.embedder.embed_queries([text])[0]
-        return self.search(qv, top_k, where=where, explain=explain, target_recall=target_recall,
-                           with_metadata=with_metadata)
+        return self.search(
+            qv,
+            top_k,
+            where=where,
+            explain=explain,
+            target_recall=target_recall,
+            with_metadata=with_metadata,
+            with_text=with_text,
+        )
 
-    def _search_lexical(self, text, top_k, where=None, explain=False, with_metadata=False):
+    def _search_lexical(
+        self, text, top_k, where=None, explain=False, with_metadata=False, with_text=False
+    ):
         if not self.lexical:
-            raise RuntimeError("collection was not created with lexical=True — mode='lexical' has no index "
-                               "(create_collection(..., lexical=True) then build_lexical())")
+            raise RuntimeError(
+                "collection was not created with lexical=True — mode='lexical' has no index "
+                "(create_collection(..., lexical=True) then build_lexical())"
+            )
         res = self._rt.search_lexical(self.idx, text, top_k, where, explain)
         if explain:
             ids, sc, ex = res
@@ -193,12 +301,37 @@ class Collection:
             out = {"ids": self._ext(ids), "scores": sc.tolist()}
         if with_metadata:
             out["metadata"] = self._rt.columns_for(self.idx, ids)
+            for m in out["metadata"]:
+                m.pop(TEXT_COLUMN, None)
+        if with_text and self.store_text:
+            out["text"] = self.texts_for(self._ext(ids))
         return out
 
     def ids(self, where=None) -> list:
         """Live external ids in the collection, optionally scoped (dict/Eq on the partition key or an
         off-key column). Enumerates what a scope currently contains — no consumer-side id map needed."""
         return self._ext(self._rt.live_ids(self.idx, where))
+
+    def texts_for(self, ids) -> list[str | None]:
+        """Read the stored raw text for the given external ids (in the same order). Returns None for ids
+        that are not live or belong to a collection without store_text=True."""
+        id_map = self._id2int
+        iids: list[int | None] = []
+        for e in ids:
+            iid = id_map.get(e)
+            iids.append(int(iid) if iid is not None else None)
+        nones = [i for i in iids if i is not None]
+        if not nones:
+            return [None for _ in ids]
+        try:
+            texts = self._rt.texts_for(self.idx, nones)
+        except NotImplementedError:
+            # Fall back to the generic metadata path for runtimes that do not implement a dedicated
+            # text accessor (e.g. the native runtime): the text column is still stored as row metadata.
+            metas = self._rt.columns_for(self.idx, nones)
+            texts = [m.get(TEXT_COLUMN) for m in metas]
+        it = iter(texts)
+        return [next(it) if i is not None else None for i in iids]
 
     # ── governed-optional auto-tuning (pluggable Tuner) ───────────────────────────────────────────
     def tune(self, workload=None, objectives=None, dry_run: bool | None = None):
@@ -207,7 +340,9 @@ class Collection:
         tuner): dry_run=True never applies (an explicit dry_run always wins); dry_run=False always applies;
         dry_run=None (default) applies only if the tuner opts in via mode='suggest_then_apply'."""
         plan = self.tuner.tune_collection(self, workload=workload, objectives=objectives)
-        apply = (dry_run is False) or (dry_run is None and getattr(self.tuner, "mode", None) == "suggest_then_apply")
+        apply = (dry_run is False) or (
+            dry_run is None and getattr(self.tuner, "mode", None) == "suggest_then_apply"
+        )
         if apply:
             self.apply_tuning(plan)
         return plan
@@ -225,7 +360,9 @@ class Collection:
             # AlgentaTuner already built them during optimization, or they were restored from disk on reopen.
             need_build = (not parts) or any(p.get("key") not in built for p in parts)
             if need_build:
-                self._rt.build_partition_ivf(self.idx, int(plan.ivf["min_rows"]), float(plan.ivf["target_recall"]))
+                self._rt.build_partition_ivf(
+                    self.idx, int(plan.ivf["min_rows"]), float(plan.ivf["target_recall"])
+                )
                 built = self._rt.partition_ivf_keys(self.idx)
             # A governed tuner (e.g. AlgentaTuner) may carry an optimized nprobe per partition; honor it
             # over the engine's per-partition calibration when present in the plan.
@@ -250,11 +387,20 @@ class Collection:
         live = {str(e) for e in self.ids()}
         missing = [str(i) for i in ids if str(i) not in live]
         if missing:
-            shown = ", ".join(missing[:8]) + (f", … (+{len(missing) - 8} more)" if len(missing) > 8 else "")
-            raise ValueError(f"update_texts: ids do not exist (use upsert_texts to insert): {shown}")
+            shown = ", ".join(missing[:8]) + (
+                f", … (+{len(missing) - 8} more)" if len(missing) > 8 else ""
+            )
+            raise ValueError(
+                f"update_texts: ids do not exist (use upsert_texts to insert): {shown}"
+            )
         tv = list(texts)
-        return self._ingest(self.embedder.embed_documents(tv), ids, metadata, upsert=True,
-                            texts=tv if self.lexical else None)
+        return self._ingest(
+            self.embedder.embed_documents(tv),
+            ids,
+            metadata,
+            upsert=True,
+            texts=tv if self.lexical or self.store_text else None,
+        )
 
     def compact(self):
         return self._rt.compact(self.idx)
@@ -267,15 +413,20 @@ class Collection:
         inserts/updates/compaction to index new rows (deletes are honored at query time either way). Requires
         the collection was created with lexical=True."""
         if not self.lexical:
-            raise RuntimeError("collection was not created with lexical=True (no tokens retained at ingest)")
+            raise RuntimeError(
+                "collection was not created with lexical=True (no tokens retained at ingest)"
+            )
         return self._rt.build_lexical(self.idx, k1, b)
 
     def snapshot(self):
         return self._rt.snapshot(self.idx)
 
     def stats(self):
-        s = dict(self._rt.stats(self.idx)); s["name"] = self.name; s["key_name"] = self.key_name
-        s["external_ids"] = len(self._int2id); return s
+        s = dict(self._rt.stats(self.idx))
+        s["name"] = self.name
+        s["key_name"] = self.key_name
+        s["external_ids"] = len(self._int2id)
+        return s
 
     # ── persistence ──────────────────────────────────────────────────────────────────────────────────
     def save(self):
@@ -284,18 +435,31 @@ class Collection:
         # JSON array of every id is a hundreds-of-MB parse on every open, defeating the mmap'd vector slabs.
         # numpy object array round-trips str/int ids exactly and loads far faster. Atomic (tmp + os.replace).
         import numpy as _np
+
         imap_tmp = os.path.join(self._dir, "id_map.npy.tmp")
         with open(imap_tmp, "wb") as _f:
             _np.save(_f, _np.array(self._int2id, dtype=object), allow_pickle=True)
         os.replace(imap_tmp, os.path.join(self._dir, "id_map.npy"))
-        meta = {"name": self.name, "dim": self.dim, "dtype": self.dtype, "key_name": self.key_name,
-                "filter_columns": self.col_names, "id_map_sidecar": "id_map.npy", "telys_version": __version__,
-                "default_target_recall": float(self.default_target_recall),  # durable so a tuned collection
-                "applied_tuner": getattr(self.tuner, "name", None),          # stays tuned across reopen
-                "lexical": bool(self.lexical),                               # retained-tokens -> rebuild plex on open
-                "embedder_profile": self.embedder.profile.as_dict() if self.embedder is not None else None}
+        meta = {
+            "name": self.name,
+            "dim": self.dim,
+            "dtype": self.dtype,
+            "key_name": self.key_name,
+            "filter_columns": self.col_names,
+            "id_map_sidecar": "id_map.npy",
+            "telys_version": __version__,
+            "default_target_recall": float(
+                self.default_target_recall
+            ),  # durable so a tuned collection
+            "applied_tuner": getattr(self.tuner, "name", None),  # stays tuned across reopen
+            "lexical": bool(self.lexical),  # retained-tokens -> rebuild plex on open
+            "store_text": bool(self.store_text),  # raw-text retention across reopen
+            "embedder_profile": self.embedder.profile.as_dict()
+            if self.embedder is not None
+            else None,
+        }
         tmp = os.path.join(self._dir, "collection.json.tmp")
-        with open(tmp, "w") as f:                            # collection.json written last = commit point
+        with open(tmp, "w") as f:  # collection.json written last = commit point
             json.dump(meta, f)
         os.replace(tmp, os.path.join(self._dir, "collection.json"))
         return self._dir
@@ -318,14 +482,21 @@ class Collection:
         d = os.path.join(engine.path, name)
         meta = json.load(open(os.path.join(d, "collection.json")))
         self = cls.__new__(cls)
-        self.engine = engine; self.name = name; self.dim = meta["dim"]; self.dtype = meta["dtype"]
-        self.key_name = meta["key_name"]; self.col_names = meta["filter_columns"]; self._dir = d
+        self.engine = engine
+        self.name = name
+        self.dim = meta["dim"]
+        self.dtype = meta["dtype"]
+        self.key_name = meta["key_name"]
+        self.col_names = meta["filter_columns"]
+        self._dir = d
         self.lexical = bool(meta.get("lexical", False))
+        self.store_text = bool(meta.get("store_text", False))
         imap = os.path.join(d, "id_map.npy")
-        if "id_map" in meta:                                 # back-compat: older inline-JSON id_map
+        if "id_map" in meta:  # back-compat: older inline-JSON id_map
             self._int2id = list(meta["id_map"])
         elif os.path.exists(imap):
             import numpy as _np
+
             self._int2id = list(_np.load(imap, allow_pickle=True))
         else:
             self._int2id = []
@@ -338,20 +509,26 @@ class Collection:
         self.default_target_recall = float(meta.get("default_target_recall", 1.0))
         self.embedder = None
         prof = meta.get("embedder_profile")
-        if embedder is None and prof is not None:           # auto-attach from the engine's provider registry
-            embedder = engine._providers.get(prof["model_id"]) or engine._providers.get(prof.get("space_id"))
+        if embedder is None and prof is not None:  # auto-attach from the engine's provider registry
+            embedder = engine._providers.get(prof["model_id"]) or engine._providers.get(
+                prof.get("space_id")
+            )
         if embedder is not None:
             if prof is not None:
                 from telys.embedding import EmbeddingProfile
+
                 stored = EmbeddingProfile(**{k: v for k, v in prof.items() if k != "space_id"})
                 if not embedder.profile.compatible_with(stored):
-                    raise ValueError(f"provider space {embedder.profile.space_id()} != collection "
-                                     f"space {stored.space_id()} (model/version/dim/normalization/metric/tokenizer)")
-            self._rt.attach_embedder(self.idx, embedder); self.embedder = embedder
-        if self.lexical:                                     # rebuild the per-partition BM25 from persisted tokens
+                    raise ValueError(
+                        f"provider space {embedder.profile.space_id()} != collection "
+                        f"space {stored.space_id()} (model/version/dim/normalization/metric/tokenizer)"
+                    )
+            self._rt.attach_embedder(self.idx, embedder)
+            self.embedder = embedder
+        if self.lexical:  # rebuild the per-partition BM25 from persisted tokens
             try:
                 self._rt.build_lexical(self.idx)
-            except NotImplementedError:                       # native runtime: dense still opens, lexical inert
+            except NotImplementedError:  # native runtime: dense still opens, lexical inert
                 pass
         return self
 
@@ -373,8 +550,15 @@ class CompactCollection:
         if embedder is not None:
             self._rt.attach_embedder(idx, embedder)
 
-    def search(self, vector, top_k: int = 10, where=None, explain: bool = False,
-               target_recall: float | None = None, with_metadata: bool = False):
+    def search(
+        self,
+        vector,
+        top_k: int = 10,
+        where=None,
+        explain: bool = False,
+        target_recall: float | None = None,
+        with_metadata: bool = False,
+    ):
         tr = 1.0 if target_recall is None else float(target_recall)
         res = self._rt.search(self.idx, vector, top_k, where, explain, tr)
         if explain:
@@ -387,13 +571,26 @@ class CompactCollection:
             out["metadata"] = self._rt.columns_for(self.idx, ids)
         return out
 
-    def search_text(self, text, top_k: int = 10, where=None, explain: bool = False,
-                    target_recall: float | None = None, with_metadata: bool = False):
+    def search_text(
+        self,
+        text,
+        top_k: int = 10,
+        where=None,
+        explain: bool = False,
+        target_recall: float | None = None,
+        with_metadata: bool = False,
+    ):
         if self.embedder is None:
             raise RuntimeError("no embedder attached — open_compact(path, embedder=...)")
         qv = self.embedder.embed_queries([text])[0]
-        return self.search(qv, top_k, where=where, explain=explain, target_recall=target_recall,
-                           with_metadata=with_metadata)
+        return self.search(
+            qv,
+            top_k,
+            where=where,
+            explain=explain,
+            target_recall=target_recall,
+            with_metadata=with_metadata,
+        )
 
     def stats(self) -> dict:
         s = dict(self._rt.stats(self.idx))
@@ -422,9 +619,30 @@ class Telys:
         """Handle form of the module-level `telys.scope_key` (docs/understand/partitions-scope-key.md)."""
         return scope_key(*parts)
 
-    def create_collection(self, name: str, dim: int, partition_by, embedder=None,
-                          dtype: str = "f32", filter_columns=(), tuner=None, lexical: bool = False) -> Collection:
-        c = Collection(self, name, dim, partition_by, embedder, dtype, filter_columns, tuner, lexical)
+    def create_collection(
+        self,
+        name: str,
+        dim: int,
+        partition_by,
+        embedder=None,
+        dtype: str = "f32",
+        filter_columns=(),
+        tuner=None,
+        lexical: bool = False,
+        store_text: bool = False,
+    ) -> Collection:
+        c = Collection(
+            self,
+            name,
+            dim,
+            partition_by,
+            embedder,
+            dtype,
+            filter_columns,
+            tuner,
+            lexical,
+            store_text,
+        )
         self._cols[name] = c
         return c
 
@@ -450,8 +668,11 @@ class Telys:
         return BlobStore(os.path.join(self.path, ".blobs", namespace))
 
     def collections(self) -> list:
-        return sorted(n for n in os.listdir(self.path)
-                      if os.path.exists(os.path.join(self.path, n, "collection.json")))
+        return sorted(
+            n
+            for n in os.listdir(self.path)
+            if os.path.exists(os.path.join(self.path, n, "collection.json"))
+        )
 
     def __getitem__(self, name: str) -> Collection:
         return self._cols.get(name) or self.open_collection(name)

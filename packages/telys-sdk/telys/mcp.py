@@ -20,10 +20,10 @@ and the MCP plugin share one code path.
 Audit: `telys mcp --monitor` appends every JSON-RPC request/response to `<memory_path>/mcp-monitor.jsonl`
 (`--monitor-log PATH` overrides the location), so you can see exactly which tools the assistant host calls.
 """
+
 from __future__ import annotations
 
 import dataclasses
-import errno
 import hashlib
 import json
 import os
@@ -56,17 +56,34 @@ _DEFAULT_MAX_SECONDS = 0
 _INDEX_COLLECTION_DEFAULT = "repo_symbols"
 
 # When there is no .gitignore to respect, fall back to skipping these obvious build/dep dirs.
-_SKIP_DIRS = frozenset({
-    ".git", "node_modules", ".venv", "__pycache__", "dist", "build",
-    ".turbo", ".pixi", ".pixi-cache", ".pnpm-store", ".next", ".mypy_cache",
-    ".pytest_cache", ".tox", ".gradle", "target",
-})
+_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "node_modules",
+        ".venv",
+        "__pycache__",
+        "dist",
+        "build",
+        ".turbo",
+        ".pixi",
+        ".pixi-cache",
+        ".pnpm-store",
+        ".next",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".tox",
+        ".gradle",
+        "target",
+    }
+)
 
 _TEXTLIKE_CTYPE = re.compile(rb"[\x00]")  # any NUL byte → treat as binary
 
 
 def default_memory_path() -> str:
-    return os.environ.get("TELYS_MEMORY_PATH") or os.path.join(os.path.expanduser("~"), ".telys", "memory")
+    return os.environ.get("TELYS_MEMORY_PATH") or os.path.join(
+        os.path.expanduser("~"), ".telys", "memory"
+    )
 
 
 def default_workspace_path() -> str | None:
@@ -76,6 +93,7 @@ def default_workspace_path() -> str | None:
 
 
 # ── locking (concurrent MCP writes to the same memory path are exclusive) ───────────────────────────────────
+
 
 @contextmanager
 def _mcp_lock(memory_path: str) -> Iterator[None]:
@@ -103,8 +121,9 @@ def _mcp_lock(memory_path: str) -> Iterator[None]:
 class TelysMemory:
     """Thin, embedder-backed wrapper over the engine — shared by the MCP server and the `telys mem` CLI."""
 
-    def __init__(self, path: str | None = None, workspace: str | None = None,
-                 persistent_index: bool = False):
+    def __init__(
+        self, path: str | None = None, workspace: str | None = None, persistent_index: bool = False
+    ):
         self.path = path or default_memory_path()
         self.workspace = workspace or default_workspace_path()
         self.persistent_index = bool(persistent_index)
@@ -117,7 +136,9 @@ class TelysMemory:
 
     def _embedder_obj(self):
         if self._embedder is None:
-            from telys.embedding import AlgentaMultigramEmbedder  # runtime-backed (needs the installed engine)
+            from telys.embedding import (
+                AlgentaMultigramEmbedder,
+            )  # runtime-backed (needs the installed engine)
 
             self._embedder = AlgentaMultigramEmbedder()
         return self._embedder
@@ -129,17 +150,31 @@ class TelysMemory:
             self._engine = Telys(self.path, embedding_providers={"multigram": self._embedder_obj()})
         return self._engine
 
-    def _collection(self, name: str, *, create: bool = False, partition_by: str = "scope",
-                    filter_columns: list[str] | None = None):
+    def _collection(
+        self,
+        name: str,
+        *,
+        create: bool = False,
+        partition_by: str = "scope",
+        filter_columns: list[str] | None = None,
+    ):
         eng = self._eng()
         if name in eng.collections():
             return eng.open_collection(name, embedder=self._embedder_obj())
         if not create:
             raise ValueError(f"collection {name!r} does not exist (create it first)")
         cols = filter_columns if filter_columns is not None else [partition_by]
-        return eng.create_collection(name, dim=self._embedder_obj().profile.dimension,
-                                     partition_by=partition_by, embedder=self._embedder_obj(),
-                                     filter_columns=cols)
+        # Memory collections created through MCP are always text-retaining and lexical-capable: agents need
+        # the raw text back, and the same retained text powers on-device BM25 when build_lexical() is run.
+        return eng.create_collection(
+            name,
+            dim=self._embedder_obj().profile.dimension,
+            partition_by=partition_by,
+            embedder=self._embedder_obj(),
+            filter_columns=cols,
+            lexical=True,
+            store_text=True,
+        )
 
     # ── existing tool ops (return plain dicts) ────────────────────────────────────────────────────────────
     def list_collections(self) -> dict:
@@ -147,16 +182,29 @@ class TelysMemory:
 
     def create_collection(self, name: str, partition_by: str = "scope") -> dict:
         self._collection(name, create=True, partition_by=partition_by)
-        return {"created": name, "dim": self._embedder_obj().profile.dimension, "partition_by": partition_by}
+        return {
+            "created": name,
+            "dim": self._embedder_obj().profile.dimension,
+            "partition_by": partition_by,
+            "store_text": True,
+            "lexical": True,
+        }
 
-    def add(self, collection: str, texts: list[str], ids: list[str] | None = None,
-            metadata: list[dict] | None = None, partition_by: str = "scope") -> dict:
+    def add(
+        self,
+        collection: str,
+        texts: list[str],
+        ids: list[str] | None = None,
+        metadata: list[dict] | None = None,
+        partition_by: str = "scope",
+    ) -> dict:
         if not texts:
             raise ValueError("texts must be non-empty")
         if ids is None:
             # Unique across repeated adds: bare m0..mN restarted at 0 on EVERY call, so the second
             # `telys mem add` / telys_add without explicit ids collided ("ids already exist").
             import uuid
+
             ids = [f"m-{uuid.uuid4().hex[:12]}" for _ in texts]
         if len(ids) != len(texts):
             raise ValueError("ids and texts length mismatch")
@@ -169,20 +217,32 @@ class TelysMemory:
             col.save()
         return {"added": len(texts), "collection": collection}
 
-    def search(self, collection: str, query: str, top_k: int = 5, where: dict | None = None) -> dict:
-        from telys import Eq
-
+    def search(
+        self, collection: str, query: str, top_k: int = 5, where: dict | None = None
+    ) -> dict:
         col = self._collection(collection, create=False)
         w = _eq_from(where)
-        res = col.search_text(str(query), top_k=int(top_k), where=w, with_metadata=True)
-        return {"collection": collection, "query": query, "hits": _flatten_hits(res)}
+        res = col.search_text(
+            str(query), top_k=int(top_k), where=w, with_metadata=True, with_text=True
+        )
+        texts = col.texts_for(res.get("ids") or []) if col.store_text else None
+        return {"collection": collection, "query": query, "hits": _flatten_hits(res, texts=texts)}
 
     def stats(self, collection: str) -> dict:
-        return {"collection": collection, "stats": self._collection(collection, create=False).stats()}
+        return {
+            "collection": collection,
+            "stats": self._collection(collection, create=False).stats(),
+        }
 
     # ── new tool ops: CRUD replicas of the SDK ────────────────────────────────────────────────────────────
-    def upsert(self, collection: str, texts: list[str], ids: list[str] | None,
-               metadata: list[dict] | None = None, partition_by: str = "scope") -> dict:
+    def upsert(
+        self,
+        collection: str,
+        texts: list[str],
+        ids: list[str] | None,
+        metadata: list[dict] | None = None,
+        partition_by: str = "scope",
+    ) -> dict:
         if ids is None:
             # Explicit JSON null from a client is the same as omitting ids: upsert with generated ids == add.
             return self.add(collection, texts, None, metadata, partition_by)
@@ -197,10 +257,17 @@ class TelysMemory:
             col.save()
         return {"upserted": len(texts), "collection": collection}
 
-    def update(self, collection: str, texts: list[str], ids: list[str] | None,
-               metadata: list[dict] | None = None) -> dict:
+    def update(
+        self,
+        collection: str,
+        texts: list[str],
+        ids: list[str] | None,
+        metadata: list[dict] | None = None,
+    ) -> dict:
         if ids is None:
-            raise ValueError("update requires ids (strict by contract — use telys_upsert to insert)")
+            raise ValueError(
+                "update requires ids (strict by contract — use telys_upsert to insert)"
+            )
         if len(ids) != len(texts):
             raise ValueError("ids and texts length mismatch")
         col = self._collection(collection, create=False)
@@ -231,8 +298,9 @@ class TelysMemory:
         w = _eq_from(where)
         return {"collection": collection, "count": len(col.ids(where=w))}
 
-    def get(self, collection: str, ids: list[str], with_metadata: bool = True,
-            with_text: bool = True) -> dict:
+    def get(
+        self, collection: str, ids: list[str], with_metadata: bool = True, with_text: bool = True
+    ) -> dict:
         """Exact row lookup by external id — no similarity search involved.
 
         Resolves external ids through the collection's id map and reads the stored filter columns straight
@@ -254,24 +322,48 @@ class TelysMemory:
                 resolved.append((pos, ext_id, int(id_map[ext_id])))
 
         if resolved and with_metadata:
+            from telys.runtime import TEXT_COLUMN
+
             iids = [iid for _, _, iid in resolved]
             metas = col._rt.columns_for(col.idx, iids)  # noqa: SLF001 — runtime row-metadata export
             for (pos, _ext, _iid), meta in zip(resolved, metas):
+                meta.pop(TEXT_COLUMN, None)
                 rows[pos]["metadata"] = meta
                 if with_text:
                     text = _hydrate_text(meta, workspace=self.workspace)
                     if text is not None:
                         rows[pos]["text"] = text
+
+        if resolved and with_text:
+            # For memory rows the raw text is stored in the index; repo rows are hydrated from metadata above.
+            stored = col.texts_for([ext_id for _, ext_id, _ in resolved])
+            for (pos, _ext_id, _iid), text in zip(resolved, stored):
+                if text is not None and "text" not in rows[pos]:
+                    rows[pos]["text"] = text
         return {"collection": collection, "rows": rows}
 
     # ── new tool ops: query variants ──────────────────────────────────────────────────────────────────────
-    def search_lexical(self, collection: str, query: str, top_k: int = 5,
-                       where: dict | None = None, explain: bool = False) -> dict:
+    def search_lexical(
+        self,
+        collection: str,
+        query: str,
+        top_k: int = 5,
+        where: dict | None = None,
+        explain: bool = False,
+    ) -> dict:
         col = self._collection(collection, create=False)
         w = _eq_from(where)
-        res = col.search_text(str(query), top_k=int(top_k), where=w, mode="lexical",
-                              explain=bool(explain), with_metadata=True)
-        return {"collection": collection, "query": query, "hits": _flatten_hits(res)}
+        res = col.search_text(
+            str(query),
+            top_k=int(top_k),
+            where=w,
+            mode="lexical",
+            explain=bool(explain),
+            with_metadata=True,
+            with_text=True,
+        )
+        texts = col.texts_for(res.get("ids") or []) if col.store_text else None
+        return {"collection": collection, "query": query, "hits": _flatten_hits(res, texts=texts)}
 
     # ── new tool ops: maintenance ─────────────────────────────────────────────────────────────────────────
     def compact(self, collection: str) -> dict:
@@ -281,7 +373,9 @@ class TelysMemory:
             col.save()
         return {"compacted": collection}
 
-    def build_ivf(self, collection: str, min_rows: int = 20000, target_recall: float = 0.98) -> dict:
+    def build_ivf(
+        self, collection: str, min_rows: int = 20000, target_recall: float = 0.98
+    ) -> dict:
         col = self._collection(collection, create=False)
         try:
             with _mcp_lock(self.path):
@@ -295,7 +389,11 @@ class TelysMemory:
                     "for large partitions (default threshold: 20000 rows); small collections use exact scans."
                 ) from e
             raise
-        return {"ivf_built": collection, "min_rows": int(min_rows), "target_recall": float(target_recall)}
+        return {
+            "ivf_built": collection,
+            "min_rows": int(min_rows),
+            "target_recall": float(target_recall),
+        }
 
     def build_lexical(self, collection: str, k1: float = 1.8, b: float = 1.0) -> dict:
         col = self._collection(collection, create=False)
@@ -307,17 +405,24 @@ class TelysMemory:
     def tune(self, collection: str, dry_run: bool | None = None) -> dict:
         col = self._collection(collection, create=False)
         plan = col.tune(dry_run=dry_run)
-        plan_dict = dataclasses.asdict(plan) if dataclasses.is_dataclass(plan) else {"repr": repr(plan)}
+        plan_dict = (
+            dataclasses.asdict(plan) if dataclasses.is_dataclass(plan) else {"repr": repr(plan)}
+        )
         return {"collection": collection, "plan": plan_dict}
 
     # ── new tool ops: auto-index ──────────────────────────────────────────────────────────────────────────
-    def index_repo(self, path: str | None = None, collection: str = _INDEX_COLLECTION_DEFAULT,
-                   mode: str = "windowed", window_lines: int = _DEFAULT_WINDOW_LINES,
-                   window_overlap_lines: int = _DEFAULT_WINDOW_OVERLAP,
-                   max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES,
-                   max_files: int = _DEFAULT_MAX_FILES,
-                   max_seconds: int = _DEFAULT_MAX_SECONDS,
-                   force: bool = False) -> dict:
+    def index_repo(
+        self,
+        path: str | None = None,
+        collection: str = _INDEX_COLLECTION_DEFAULT,
+        mode: str = "windowed",
+        window_lines: int = _DEFAULT_WINDOW_LINES,
+        window_overlap_lines: int = _DEFAULT_WINDOW_OVERLAP,
+        max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES,
+        max_files: int = _DEFAULT_MAX_FILES,
+        max_seconds: int = _DEFAULT_MAX_SECONDS,
+        force: bool = False,
+    ) -> dict:
         """Walk a repo dir → chunk each text file (windowed or whole-file) → ingest into a Telys collection.
 
         Incremental refresh: if the collection already has a fingerprint for this repo_id, walk the tree and
@@ -350,9 +455,14 @@ class TelysMemory:
         new_texts: dict[str, str] = {}  # relpath → full file text (only for files that changed)
         walked = 0
         prior = self._index_fp.get(repo_id, {})
-        for relpath, size, mtime_ns in _iter_repo_files(root, allowed=allowed, skip_dirs=_SKIP_DIRS,
-                                                        max_file_bytes=max_file_bytes, deadline=deadline,
-                                                        known=prior):
+        for relpath, size, mtime_ns in _iter_repo_files(
+            root,
+            allowed=allowed,
+            skip_dirs=_SKIP_DIRS,
+            max_file_bytes=max_file_bytes,
+            deadline=deadline,
+            known=prior,
+        ):
             walked += 1
             if max_files > 0 and walked > max_files:
                 break
@@ -369,9 +479,18 @@ class TelysMemory:
         removed_paths = [p for p in old_fp if p not in new_fp]
 
         # Fast path: no changes at all + collection exists.
-        if not force and not changed_paths and not removed_paths and collection in eng.collections():
-            return {"status": "hit", "collection": collection, "repo_id": repo_id,
-                    "files_tracked": len(new_fp)}
+        if (
+            not force
+            and not changed_paths
+            and not removed_paths
+            and collection in eng.collections()
+        ):
+            return {
+                "status": "hit",
+                "collection": collection,
+                "repo_id": repo_id,
+                "files_tracked": len(new_fp),
+            }
 
         # Read the changed files' text (bounded — files were already size-checked in the walker).
         for rel in changed_paths:
@@ -382,9 +501,12 @@ class TelysMemory:
             except OSError:
                 continue
 
-        col = self._collection(collection, create=True, partition_by="repo_id",
-                               filter_columns=["repo_id", "path", "language",
-                                               "start_line", "end_line"])
+        col = self._collection(
+            collection,
+            create=True,
+            partition_by="repo_id",
+            filter_columns=["repo_id", "path", "language", "start_line", "end_line"],
+        )
 
         # Build the (texts, ids, metas) triple OUTSIDE the lock so lock hold time is minimized.
         add_texts: list[str] = []
@@ -393,8 +515,12 @@ class TelysMemory:
         for rel, text in new_texts.items():
             if time.monotonic() > deadline:
                 break
-            chunks = _chunk_text(text, mode=mode, window_lines=window_lines,
-                                 window_overlap_lines=window_overlap_lines)
+            chunks = _chunk_text(
+                text,
+                mode=mode,
+                window_lines=window_lines,
+                window_overlap_lines=window_overlap_lines,
+            )
             lang = _guess_language(rel)
             for chunk_idx, (start_line, end_line, chunk) in enumerate(chunks):
                 if not chunk.strip():
@@ -405,14 +531,16 @@ class TelysMemory:
                 # dictionary-encoded in the index (col_v2i / col_i2v), so a unique-per-row blob would blow
                 # the dictionary up to one entry per chunk. `path` + line range is the pointer; the exact
                 # source slice is re-read from disk on demand (see `_hydrate_text`).
-                add_meta.append({
-                    "repo_id": repo_id,
-                    "path": rel,
-                    "language": lang,
-                    "chunk": chunk_idx,
-                    "start_line": start_line,
-                    "end_line": end_line,
-                })
+                add_meta.append(
+                    {
+                        "repo_id": repo_id,
+                        "path": rel,
+                        "language": lang,
+                        "chunk": chunk_idx,
+                        "start_line": start_line,
+                        "end_line": end_line,
+                    }
+                )
 
         with _mcp_lock(self.path):
             # Drop rows belonging to changed + removed files. Row ids are `{repo_id}:{relpath}:{chunk_idx}`,
@@ -427,7 +555,7 @@ class TelysMemory:
                 for row_id in col.ids():
                     if not row_id.startswith(id_prefix):
                         continue
-                    rel = row_id[len(id_prefix):].rpartition(":")[0]
+                    rel = row_id[len(id_prefix) :].rpartition(":")[0]
                     if rel in stale_paths:
                         stale_ids.append(row_id)
             if stale_ids:
@@ -473,9 +601,12 @@ class TelysMemory:
             root = Path(self.workspace).resolve()
             where = Eq("repo_id", _repo_id(root))
         res = col.search_text(str(query), top_k=int(top_k), where=where, with_metadata=True)
-        return {"collection": _INDEX_COLLECTION_DEFAULT, "query": query,
-                "index_status": index_result.get("status"),
-                "hits": _flatten_hits(res, workspace=self.workspace, hydrate=True)}
+        return {
+            "collection": _INDEX_COLLECTION_DEFAULT,
+            "query": query,
+            "index_status": index_result.get("status"),
+            "hits": _flatten_hits(res, workspace=self.workspace, hydrate=True),
+        }
 
     def workspace_info(self) -> dict:
         root = Path(self.workspace).resolve() if self.workspace else None
@@ -520,14 +651,20 @@ class TelysMemory:
             tmp = p + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 # Serialize tuples as lists (JSON has no tuple type).
-                json.dump({r: {rel: list(sm) for rel, sm in files.items()}
-                           for r, files in self._index_fp.items()}, fh)
+                json.dump(
+                    {
+                        r: {rel: list(sm) for rel, sm in files.items()}
+                        for r, files in self._index_fp.items()
+                    },
+                    fh,
+                )
             os.replace(tmp, p)
         except OSError:
             pass  # best-effort — a locked / full disk should not break MCP calls
 
 
 # ── module-level helpers (auto-index walker, chunker, fingerprint) ──────────────────────────────────────────
+
 
 def _eq_from(where: dict | None):
     """Build a single-key equality filter from a dict, or None. Rejects multi-key dicts."""
@@ -537,16 +674,23 @@ def _eq_from(where: dict | None):
         raise ValueError(f"where accepts a single equality key; got {len(where)} keys")
     from telys import Eq
 
-    (k, v), = where.items()
+    ((k, v),) = where.items()
     return Eq(k, v)
 
 
-def _flatten_hits(res: Any, *, workspace: str | None = None, hydrate: bool = False) -> list[dict]:
+def _flatten_hits(
+    res: Any,
+    *,
+    workspace: str | None = None,
+    hydrate: bool = False,
+    texts: list[str | None] | None = None,
+) -> list[dict]:
     """Normalize a Collection.search_text() response to a list of {id, score?, metadata?, text?} dicts.
 
     When `hydrate` is set (repo-index hits), the exact source slice named by the row's `path` +
     `start_line`/`end_line` metadata is read back from disk — the index never stores a second copy of the
-    repo, so this is where a hit becomes readable code for the LLM.
+    repo, so this is where a hit becomes readable code for the LLM. When `texts` is provided (memory rows
+    with store_text=True), the stored raw text is added directly.
     """
     if not isinstance(res, dict):
         return []
@@ -565,6 +709,8 @@ def _flatten_hits(res: Any, *, workspace: str | None = None, hydrate: bool = Fal
                 text = _hydrate_text(m, workspace=workspace)
                 if text is not None:
                     row["text"] = text
+        if texts and i < len(texts) and texts[i] is not None and "text" not in row:
+            row["text"] = texts[i]
         hits.append(row)
     return hits
 
@@ -592,7 +738,7 @@ def _hydrate_text(meta: Any, *, workspace: str | None) -> str | None:
         text = target.read_text(encoding="utf-8", errors="replace")
         if isinstance(start, int) and isinstance(end, int) and start >= 1 and end >= start:
             lines = text.splitlines(keepends=True)
-            return "".join(lines[start - 1:end])
+            return "".join(lines[start - 1 : end])
         return text
     except (OSError, ValueError):
         return None
@@ -615,7 +761,9 @@ def _gitignore_allowlist(root: Path) -> set[str] | None:
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "ls-files", "-co", "--exclude-standard", "-z"],
-            capture_output=True, timeout=15, check=False,
+            capture_output=True,
+            timeout=15,
+            check=False,
         )
         if proc.returncode != 0:
             return None
@@ -624,9 +772,15 @@ def _gitignore_allowlist(root: Path) -> set[str] | None:
         return None
 
 
-def _iter_repo_files(root: Path, *, allowed: set[str] | None, skip_dirs: frozenset,
-                     max_file_bytes: int, deadline: float,
-                     known: dict[str, tuple[int, int]] | None = None) -> Iterator[tuple[str, int, int]]:
+def _iter_repo_files(
+    root: Path,
+    *,
+    allowed: set[str] | None,
+    skip_dirs: frozenset,
+    max_file_bytes: int,
+    deadline: float,
+    known: dict[str, tuple[int, int]] | None = None,
+) -> Iterator[tuple[str, int, int]]:
     """Yield (relpath_posix, size_bytes, mtime_ns) for each ingestable file under root.
 
     - When `allowed` is set (git checkout), iterate exactly that list — trusting .gitignore.
@@ -647,7 +801,10 @@ def _iter_repo_files(root: Path, *, allowed: set[str] | None, skip_dirs: frozens
             try:
                 if candidate.is_symlink():
                     real = candidate.resolve()
-                    if not str(real).startswith(str(root.resolve()) + os.sep) and real != root.resolve():
+                    if (
+                        not str(real).startswith(str(root.resolve()) + os.sep)
+                        and real != root.resolve()
+                    ):
                         continue
                 if not candidate.is_file():
                     continue
@@ -680,7 +837,10 @@ def _iter_repo_files(root: Path, *, allowed: set[str] | None, skip_dirs: frozens
             try:
                 if candidate.is_symlink():
                     real = candidate.resolve()
-                    if not str(real).startswith(str(root.resolve()) + os.sep) and real != root.resolve():
+                    if (
+                        not str(real).startswith(str(root.resolve()) + os.sep)
+                        and real != root.resolve()
+                    ):
                         continue
                 st = candidate.stat()
                 if max_file_bytes > 0 and st.st_size > max_file_bytes:
@@ -703,8 +863,9 @@ def _looks_binary(path: Path, probe_bytes: int = 8192) -> bool:
         return True  # unreadable → treat as binary
 
 
-def _chunk_text(text: str, *, mode: str, window_lines: int, window_overlap_lines: int
-                ) -> list[tuple[int, int, str]]:
+def _chunk_text(
+    text: str, *, mode: str, window_lines: int, window_overlap_lines: int
+) -> list[tuple[int, int, str]]:
     """Chunk `text` into records for ingestion. Returns list of (start_line, end_line, body).
 
     mode="file"     — one record per file (line range covers the whole file).
@@ -729,17 +890,55 @@ def _chunk_text(text: str, *, mode: str, window_lines: int, window_overlap_lines
 
 
 _LANG_BY_EXT = {
-    ".py": "python", ".pyi": "python",
-    ".ts": "typescript", ".tsx": "typescript", ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
-    ".rs": "rust", ".go": "go", ".java": "java", ".kt": "kotlin",
-    ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".hpp": "cpp", ".hh": "cpp",
-    ".mojo": "mojo", ".zig": "zig", ".swift": "swift", ".m": "objective-c", ".mm": "objective-cpp",
-    ".rb": "ruby", ".php": "php", ".pl": "perl", ".lua": "lua", ".r": "r", ".jl": "julia",
-    ".sh": "shell", ".bash": "shell", ".zsh": "shell", ".fish": "shell",
-    ".md": "markdown", ".mdx": "markdown", ".rst": "restructuredtext", ".txt": "text",
-    ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml", ".ini": "ini", ".xml": "xml",
-    ".html": "html", ".css": "css", ".scss": "scss",
-    ".sql": "sql", ".proto": "protobuf", ".graphql": "graphql", ".dockerfile": "dockerfile",
+    ".py": "python",
+    ".pyi": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".rs": "rust",
+    ".go": "go",
+    ".java": "java",
+    ".kt": "kotlin",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".mojo": "mojo",
+    ".zig": "zig",
+    ".swift": "swift",
+    ".m": "objective-c",
+    ".mm": "objective-cpp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".pl": "perl",
+    ".lua": "lua",
+    ".r": "r",
+    ".jl": "julia",
+    ".sh": "shell",
+    ".bash": "shell",
+    ".zsh": "shell",
+    ".fish": "shell",
+    ".md": "markdown",
+    ".mdx": "markdown",
+    ".rst": "restructuredtext",
+    ".txt": "text",
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".ini": "ini",
+    ".xml": "xml",
+    ".html": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".sql": "sql",
+    ".proto": "protobuf",
+    ".graphql": "graphql",
+    ".dockerfile": "dockerfile",
 }
 
 
@@ -755,372 +954,743 @@ def _guess_language(rel: str) -> str:
 
 # ── MCP tool schemas ────────────────────────────────────────────────────────────────────────────────────────
 
-_WHERE_SCHEMA = {"type": "object", "maxProperties": 1,
-                 "description": ("optional single-key equality filter, e.g. scope=project:acme "
-                                 "(one key only)")}
+_WHERE_SCHEMA = {
+    "type": "object",
+    "maxProperties": 1,
+    "description": ("optional single-key equality filter, e.g. scope=project:acme (one key only)"),
+}
 
 TOOLS = [
     # ── existing 5 ────────────────────────────────────────────────────────────────────────────────────────
-    {"name": "telys_search",
-     "description": ("Semantic + lexical search over a Telys memory collection: the server embeds "
-                     "`query` with its built-in on-device embedder and returns the best-matching "
-                     "live rows as hits (id, score, metadata). Use to recall stored "
-                     "notes/facts/decisions before answering. Choose this embedding-ranked path "
-                     "when wording varies; choose telys_search_lexical when exact terms and BM25 "
-                     "scoring matter. Required: collection, query. Optional: top_k (default 5) "
-                     "and where — a single-key equality filter such as scope=project:acme (one "
-                     "key only; MCP-created collections are partitioned by `scope`). Fails "
-                     "(isError) when the collection does not exist — write first via telys_add or "
-                     "telys_create_collection — or when `where` carries more than one key."),
-     "inputSchema": {"type": "object", "required": ["collection", "query"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection in the active store"},
-         "query": {"type": "string",
-                   "description": "text query; embedded on-device before searching"},
-         "top_k": {"type": "integer", "default": 5,
-                   "description": "maximum hits to return, ordered best-first"},
-         "where": _WHERE_SCHEMA}},
-     "annotations": {"readOnlyHint": True, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-    {"name": "telys_add",
-     "description": ("Add text documents to a Telys memory collection: each text is embedded "
-                     "on-device, inserted as a new row, and persisted; the collection is "
-                     "auto-created (partition_by='scope') when absent. Use to store new memories. "
-                     "Required: collection, texts. Optional: ids (one per text; auto-generated "
-                     "when omitted — an id that already exists raises a conflict, so use "
-                     "telys_upsert to replace) and metadata (one object per text; set a `scope` "
-                     "value to route partitions and enable where-filtering later). Fails on empty "
-                     "texts, ids/texts length mismatch, or duplicate ids. NOT idempotent: omitted "
-                     "ids are freshly generated per call, so a repeat call inserts additional new "
-                     "rows."),
-     "inputSchema": {"type": "object", "required": ["collection", "texts"], "properties": {
-         "collection": {"type": "string",
-                        "description": "target collection; auto-created with "
-                        "partition_by='scope' when absent"},
-         "texts": {"type": "array", "items": {"type": "string"},
-                   "description": "documents to embed on-device and insert; one new row per text"},
-         "ids": {"type": "array", "items": {"type": "string"},
-                 "description": "external ids, one per text positionally; auto-generated when "
-                 "omitted"},
-         "metadata": {"type": "array", "items": {"type": "object"},
-                      "description": "one object per text positionally; set `scope` to route "
-                      "partitions"}}},
-     "annotations": {"readOnlyHint": False, "destructiveHint": False,
-                     "idempotentHint": False, "openWorldHint": False}},
-    {"name": "telys_create_collection",
-     "description": ("Create a named Telys memory collection in the active store, wired to the "
-                     "built-in embedder. Optional — telys_add auto-creates on first write — but "
-                     "use it to fix the name and partition key up front. Required: name. "
-                     "Optional: partition_by (default 'scope'; a single metadata key name — "
-                     "compose compound keys into one string yourself). The new collection is "
-                     "built but NOT persisted, so telys_list_collections shows it only after a "
-                     "mutating tool (telys_add, telys_upsert, …) writes to it. Repeating with the "
-                     "same name returns the existing collection unchanged."),
-     "inputSchema": {"type": "object", "required": ["name"], "properties": {
-         "name": {"type": "string", "description": "name for the new collection"},
-         "partition_by": {"type": "string", "default": "scope",
-                          "description": "metadata key used as the physical partition key"}}},
-     "annotations": {"readOnlyHint": False, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-    {"name": "telys_list_collections",
-     "description": ("List the Telys memory collections saved in the active store "
-                     "($TELYS_MEMORY_PATH, default ~/.telys/memory). Use to discover what exists "
-                     "before searching or writing. Takes no arguments and returns sorted names; "
-                     "an empty store yields an empty list, not an error. Collections created but "
-                     "never written to by a mutating tool do not appear — if names you expect are "
-                     "missing, check the client points at the right store."),
-     "inputSchema": {"type": "object", "properties": {}},
-     "annotations": {"readOnlyHint": True, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-    {"name": "telys_stats",
-     "description": ("Report stats for one Telys memory collection: name, partition key name, and "
-                     "live external-id count, plus runtime-provided counters (row counts, "
-                     "dimension, index state) that vary by runtime version. Use to confirm a "
-                     "collection exists and gauge its size. Siblings: telys_list_collections "
-                     "enumerates collections; telys_count returns cardinality only. Required: "
-                     "collection. Fails when the collection does not exist."),
-     "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection in the active store"}}},
-     "annotations": {"readOnlyHint": True, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-
+    {
+        "name": "telys_search",
+        "description": (
+            "Semantic + lexical search over a Telys memory collection: the server embeds "
+            "`query` with its built-in on-device embedder and returns the best-matching "
+            "live rows as hits (id, score, metadata, text). Use to recall stored "
+            "notes/facts/decisions before answering. The raw text is included for memory "
+            "rows created through MCP, so agents can read what they stored without a "
+            "separate telys_get. Choose this embedding-ranked path when wording varies; "
+            "choose telys_search_lexical when exact terms and BM25 scoring matter. "
+            "Required: collection, query. Optional: top_k (default 5) and where — a "
+            "single-key equality filter such as scope=project:acme (one key only; "
+            "MCP-created collections are partitioned by `scope`). Fails (isError) when "
+            "the collection does not exist — write first via telys_add or "
+            "telys_create_collection — or when `where` carries more than one key."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection", "query"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection in the active store",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "text query; embedded on-device before searching",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "maximum hits to return, ordered best-first",
+                },
+                "where": _WHERE_SCHEMA,
+            },
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_add",
+        "description": (
+            "Add text documents to a Telys memory collection: each text is embedded "
+            "on-device, inserted as a new row, and persisted; the collection is "
+            "auto-created (partition_by='scope') when absent. Use to store new memories. "
+            "Required: collection, texts. Optional: ids (one per text; auto-generated "
+            "when omitted — an id that already exists raises a conflict, so use "
+            "telys_upsert to replace) and metadata (one object per text; set a `scope` "
+            "value to route partitions and enable where-filtering later). Fails on empty "
+            "texts, ids/texts length mismatch, or duplicate ids. NOT idempotent: omitted "
+            "ids are freshly generated per call, so a repeat call inserts additional new "
+            "rows."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection", "texts"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "target collection; auto-created with "
+                    "partition_by='scope' when absent",
+                },
+                "texts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "documents to embed on-device and insert; one new row per text",
+                },
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "external ids, one per text positionally; auto-generated when "
+                    "omitted",
+                },
+                "metadata": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "one object per text positionally; set `scope` to route "
+                    "partitions",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_create_collection",
+        "description": (
+            "Create a named Telys memory collection in the active store, wired to the "
+            "built-in embedder. Optional — telys_add auto-creates on first write — but "
+            "use it to fix the name and partition key up front. Required: name. "
+            "Optional: partition_by (default 'scope'; a single metadata key name — "
+            "compose compound keys into one string yourself). Collections created through "
+            "MCP are automatically text-retaining and lexical-capable: stored text is "
+            "returned by telys_get and telys_search, and telys_build_lexical / "
+            "telys_search_lexical work out of the box. The new collection is built but "
+            "NOT persisted, so telys_list_collections shows it only after a mutating tool "
+            "(telys_add, telys_upsert, …) writes to it. Repeating with the same name "
+            "returns the existing collection unchanged."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string", "description": "name for the new collection"},
+                "partition_by": {
+                    "type": "string",
+                    "default": "scope",
+                    "description": "metadata key used as the physical partition key",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_list_collections",
+        "description": (
+            "List the Telys memory collections saved in the active store "
+            "($TELYS_MEMORY_PATH, default ~/.telys/memory). Use to discover what exists "
+            "before searching or writing. Takes no arguments and returns sorted names; "
+            "an empty store yields an empty list, not an error. Collections created but "
+            "never written to by a mutating tool do not appear — if names you expect are "
+            "missing, check the client points at the right store."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_stats",
+        "description": (
+            "Report stats for one Telys memory collection: name, partition key name, and "
+            "live external-id count, plus runtime-provided counters (row counts, "
+            "dimension, index state) that vary by runtime version. Use to confirm a "
+            "collection exists and gauge its size. Siblings: telys_list_collections "
+            "enumerates collections; telys_count returns cardinality only. Required: "
+            "collection. Fails when the collection does not exist."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection in the active store",
+                }
+            },
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
     # ── CRUD replicas ─────────────────────────────────────────────────────────────────────────────────────
-    {"name": "telys_upsert",
-     "description": ("Add-or-replace text rows by external id: new ids are inserted; existing ids "
-                     "are re-embedded and replaced as a versioned update (never a duplicate "
-                     "physical row), then persisted. Use when the caller owns the ids and a "
-                     "repeated call must converge instead of conflicting — this is the idempotent "
-                     "write path. Required: collection, texts, ids (explicit JSON null is treated "
-                     "as omitted = plain telys_add with generated ids). Optional: metadata (one "
-                     "object per text) and partition_by (default 'scope'; the collection is "
-                     "auto-created when absent). Fails on ids/texts length mismatch."),
-     "inputSchema": {"type": "object", "required": ["collection", "texts", "ids"], "properties": {
-         "collection": {"type": "string",
-                        "description": "target collection; auto-created (with partition_by) when "
-                        "absent"},
-         "texts": {"type": "array", "items": {"type": "string"},
-                   "description": "documents to embed on-device; one row per text"},
-         "ids": {"type": "array", "items": {"type": "string"},
-                 "description": "external ids, one per text; new ids insert, existing ids are "
-                 "replaced"},
-         "metadata": {"type": "array", "items": {"type": "object"},
-                      "description": "one object per text positionally; the partition key is "
-                      "defaulted when omitted"},
-         "partition_by": {"type": "string", "default": "scope",
-                          "description": "partition key used when auto-creating the collection"}}},
-     "annotations": {"readOnlyHint": False, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-    {"name": "telys_update",
-     "description": ("Replace the vectors/metadata of EXISTING ids by re-embedding new texts, "
-                     "then persist. Use for deliberate corrections to known rows. Required: "
-                     "collection, texts, ids — strict by contract: missing or null ids fail with "
-                     "'update requires ids' (use telys_upsert to insert-or-replace instead). "
-                     "Optional: metadata (one object per text; the collection's partition key is "
-                     "defaulted when omitted). Fails when the collection does not exist or on "
-                     "ids/texts length mismatch."),
-     "inputSchema": {"type": "object", "required": ["collection", "texts", "ids"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection in the active store"},
-         "texts": {"type": "array", "items": {"type": "string"},
-                   "description": "replacement texts, embedded on-device; one per id"},
-         "ids": {"type": "array", "items": {"type": "string"},
-                 "description": "external ids of EXISTING rows to replace (strict: required)"},
-         "metadata": {"type": "array", "items": {"type": "object"},
-                      "description": "one object per text positionally; the partition key is "
-                      "defaulted when omitted"}}},
-     "annotations": {"readOnlyHint": False, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-    {"name": "telys_delete",
-     "description": ("Tombstone rows by external id so they no longer appear in queries or id "
-                     "listings; the store is persisted and the space is physically reclaimed "
-                     "later by telys_compact. Use to forget memories. Required: collection, ids. "
-                     "Repeating the same delete is a no-op. Fails when the collection does not "
-                     "exist."),
-     "inputSchema": {"type": "object", "required": ["collection", "ids"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection in the active store"},
-         "ids": {"type": "array", "items": {"type": "string"},
-                 "description": "external ids to tombstone"}}},
-     "annotations": {"readOnlyHint": False, "destructiveHint": True,
-                     "idempotentHint": True, "openWorldHint": False}},
-    {"name": "telys_ids",
-     "description": ("Return the live (non-tombstoned) external ids in a collection, optionally "
-                     "scoped by a where filter — enumeration without ranking. Siblings: "
-                     "telys_search returns ranked hits with scores for a query; telys_count "
-                     "returns just the cardinality. Required: collection. Optional: where — a "
-                     "single-key equality filter such as scope=project:acme (one key only). "
-                     "Result: the full id list in a single response (no pagination); the order is "
-                     "the engine's internal row order — neither sorted nor insertion order — so "
-                     "sort client-side when a stable display order matters. Fails when the "
-                     "collection does not exist or when `where` carries more than one key."),
-     "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection in the active store"},
-         "where": _WHERE_SCHEMA}},
-     "annotations": {"readOnlyHint": True, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-    {"name": "telys_count",
-     "description": ("Return the live row count (post-tombstone) for a collection — cardinality "
-                     "only, optionally where-scoped. Siblings: telys_stats for aggregate stats "
-                     "(partition key, live id count, runtime index counters); telys_ids to "
-                     "enumerate the ids themselves. Required: collection — the name of an "
-                     "existing collection in the active store; the call fails when it does not "
-                     "exist (write first via telys_add or telys_create_collection). Optional: "
-                     "where — a single-key equality filter (one key only); more than one key "
-                     "fails."),
-     "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection in the active store"},
-         "where": _WHERE_SCHEMA}},
-     "annotations": {"readOnlyHint": True, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-    {"name": "telys_get",
-     "description": ("Exact row lookup by external id — no similarity search. Returns one entry "
-                     "per requested id with a found flag plus stored metadata; for auto-indexed "
-                     "repo rows the exact source slice is re-read from disk via the row's path + "
-                     "line range. Use to fetch known rows or read the code behind a "
-                     "telys_repo_search hit. Required: collection, ids. Optional: with_metadata "
-                     "(default true) and with_text (default true; re-read the source slice for "
-                     "repo-index rows). Unknown ids come back as found:false, not an error; fails "
-                     "only when the collection does not exist."),
-     "inputSchema": {"type": "object", "required": ["collection", "ids"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection in the active store"},
-         "ids": {"type": "array", "items": {"type": "string"},
-                 "description": "external ids to look up exactly (no similarity search)"},
-         "with_metadata": {"type": "boolean", "default": True,
-                           "description": "include stored metadata for found rows"},
-         "with_text": {"type": "boolean", "default": True,
-                       "description": "re-read the source slice for repo-index rows"}}},
-     "annotations": {"readOnlyHint": True, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-
+    {
+        "name": "telys_upsert",
+        "description": (
+            "Add-or-replace text rows by external id: new ids are inserted; existing ids "
+            "are re-embedded and replaced as a versioned update (never a duplicate "
+            "physical row), then persisted. Use when the caller owns the ids and a "
+            "repeated call must converge instead of conflicting — this is the idempotent "
+            "write path. Required: collection, texts, ids (explicit JSON null is treated "
+            "as omitted = plain telys_add with generated ids). Optional: metadata (one "
+            "object per text) and partition_by (default 'scope'; the collection is "
+            "auto-created when absent). Fails on ids/texts length mismatch."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection", "texts", "ids"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "target collection; auto-created (with partition_by) when "
+                    "absent",
+                },
+                "texts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "documents to embed on-device; one row per text",
+                },
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "external ids, one per text; new ids insert, existing ids are "
+                    "replaced",
+                },
+                "metadata": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "one object per text positionally; the partition key is "
+                    "defaulted when omitted",
+                },
+                "partition_by": {
+                    "type": "string",
+                    "default": "scope",
+                    "description": "partition key used when auto-creating the collection",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_update",
+        "description": (
+            "Replace the vectors/metadata of EXISTING ids by re-embedding new texts, "
+            "then persist. Use for deliberate corrections to known rows. Required: "
+            "collection, texts, ids — strict by contract: missing or null ids fail with "
+            "'update requires ids' (use telys_upsert to insert-or-replace instead). "
+            "Optional: metadata (one object per text; the collection's partition key is "
+            "defaulted when omitted). Fails when the collection does not exist or on "
+            "ids/texts length mismatch."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection", "texts", "ids"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection in the active store",
+                },
+                "texts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "replacement texts, embedded on-device; one per id",
+                },
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "external ids of EXISTING rows to replace (strict: required)",
+                },
+                "metadata": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "one object per text positionally; the partition key is "
+                    "defaulted when omitted",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_delete",
+        "description": (
+            "Tombstone rows by external id so they no longer appear in queries or id "
+            "listings; the store is persisted and the space is physically reclaimed "
+            "later by telys_compact. Use to forget memories. Required: collection, ids. "
+            "Repeating the same delete is a no-op. Fails when the collection does not "
+            "exist."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection", "ids"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection in the active store",
+                },
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "external ids to tombstone",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_ids",
+        "description": (
+            "Return the live (non-tombstoned) external ids in a collection, optionally "
+            "scoped by a where filter — enumeration without ranking. Siblings: "
+            "telys_search returns ranked hits with scores for a query; telys_count "
+            "returns just the cardinality. Required: collection. Optional: where — a "
+            "single-key equality filter such as scope=project:acme (one key only). "
+            "Result: the full id list in a single response (no pagination); the order is "
+            "the engine's internal row order — neither sorted nor insertion order — so "
+            "sort client-side when a stable display order matters. Fails when the "
+            "collection does not exist or when `where` carries more than one key."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection in the active store",
+                },
+                "where": _WHERE_SCHEMA,
+            },
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_count",
+        "description": (
+            "Return the live row count (post-tombstone) for a collection — cardinality "
+            "only, optionally where-scoped. Siblings: telys_stats for aggregate stats "
+            "(partition key, live id count, runtime index counters); telys_ids to "
+            "enumerate the ids themselves. Required: collection — the name of an "
+            "existing collection in the active store; the call fails when it does not "
+            "exist (write first via telys_add or telys_create_collection). Optional: "
+            "where — a single-key equality filter (one key only); more than one key "
+            "fails."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection in the active store",
+                },
+                "where": _WHERE_SCHEMA,
+            },
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_get",
+        "description": (
+            "Exact row lookup by external id — no similarity search. Returns one entry "
+            "per requested id with a found flag plus stored metadata; for auto-indexed "
+            "repo rows the exact source slice is re-read from disk via the row's path + "
+            "line range. For memory rows created through MCP, the stored raw text is also "
+            "returned. Use to fetch known rows or read the code behind a "
+            "telys_repo_search hit. Required: collection, ids. Optional: with_metadata "
+            "(default true) and with_text (default true; re-read the source slice for "
+            "repo-index rows, or return stored text for memory rows). Unknown ids come "
+            "back as found:false, not an error; fails only when the collection does not "
+            "exist."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection", "ids"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection in the active store",
+                },
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "external ids to look up exactly (no similarity search)",
+                },
+                "with_metadata": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "include stored metadata for found rows",
+                },
+                "with_text": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "re-read the source slice for repo-index rows",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
     # ── query variants ────────────────────────────────────────────────────────────────────────────────────
-    {"name": "telys_search_lexical",
-     "description": ("On-device BM25 lexical (keyword) search — exact-term matching for "
-                     "identifiers and rare tokens where semantic search is fuzzy. Sibling: use "
-                     "telys_search for embedding-ranked (vector) retrieval; this tool is the BM25 "
-                     "path, no embedding involved. Requires the collection to have been created "
-                     "with lexical=True AND telys_build_lexical to have run, otherwise the call "
-                     "fails. Required: collection, query. Optional: top_k (default 5), where "
-                     "(single-key equality filter), explain (default false; include per-hit score "
-                     "explanations). Fails when the collection does not exist or the lexical "
-                     "index was never built."),
-     "inputSchema": {"type": "object", "required": ["collection", "query"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection created with lexical=True"},
-         "query": {"type": "string", "description": "keyword query for BM25 matching"},
-         "top_k": {"type": "integer", "default": 5,
-                   "description": "maximum hits to return, ordered best-first"},
-         "where": _WHERE_SCHEMA,
-         "explain": {"type": "boolean", "default": False,
-                     "description": "include per-hit score explanations"}}},
-     "annotations": {"readOnlyHint": True, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-
+    {
+        "name": "telys_search_lexical",
+        "description": (
+            "On-device BM25 lexical (keyword) search — exact-term matching for "
+            "identifiers and rare tokens where semantic search is fuzzy. Sibling: use "
+            "telys_search for embedding-ranked (vector) retrieval; this tool is the BM25 "
+            "path, no embedding involved. Collections created through MCP are "
+            "lexical-capable; run telys_build_lexical once after bulk ingestion, then "
+            "telys_search_lexical returns hits including the stored text. Required: "
+            "collection, query. Optional: top_k (default 5), where (single-key equality "
+            "filter), explain (default false; include per-hit score explanations). Fails "
+            "when the collection does not exist or the lexical index was never built."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection", "query"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection created with lexical=True",
+                },
+                "query": {"type": "string", "description": "keyword query for BM25 matching"},
+                "top_k": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "maximum hits to return, ordered best-first",
+                },
+                "where": _WHERE_SCHEMA,
+                "explain": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "include per-hit score explanations",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
     # ── maintenance ───────────────────────────────────────────────────────────────────────────────────────
-    {"name": "telys_compact",
-     "description": ("Flush tombstones and merge the delta segment into the base layout, "
-                     "physically reclaiming space from deleted/updated rows; the store is "
-                     "persisted. Use after large delete or update batches. Alternatives: "
-                     "telys_delete to remove rows, telys_tune for index tuning. Required: "
-                     "collection. Repeating with no pending changes is a no-op. Fails when the "
-                     "collection does not exist."),
-     "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection in the active store"}}},
-     "annotations": {"readOnlyHint": False, "destructiveHint": True,
-                     "idempotentHint": True, "openWorldHint": False}},
-    {"name": "telys_build_ivf",
-     "description": ("Build per-partition IVF indexes and calibrate nprobe to a recall floor — "
-                     "approximate search for partitions that have outgrown exact scans. "
-                     "Maintenance sibling of telys_compact (physically reclaim space from "
-                     "deletes) and telys_tune (plan and optionally apply tuning automatically). "
-                     "Required: collection. Optional: min_rows (default 20000; only partitions "
-                     "with at least this many rows get an IVF index — smaller ones keep exact "
-                     "scans) and target_recall (default 0.98). Fails when the collection does not "
-                     "exist; needs the optional faiss dependency — the error names the fix (pipx: "
-                     "`pipx inject telys faiss-cpu`; venv: `pip install faiss-cpu`)."),
-     "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection in the active store"},
-         "min_rows": {"type": "integer", "default": 20000,
-                      "description": "only partitions with at least this many rows get an IVF "
-                      "index (smaller stay exact)"},
-         "target_recall": {"type": "number", "default": 0.98,
-                           "description": "recall floor the nprobe calibration targets"}}},
-     "annotations": {"readOnlyHint": False, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-    {"name": "telys_build_lexical",
-     "description": ("Fit the BM25 lexical index over the collection's retained tokens and "
-                     "persist it; the collection must have been created with lexical=True. This "
-                     "builds the lexical BM25 index; telys_build_ivf builds the IVF vector index. "
-                     "Run after bulk ingestion and before telys_search_lexical. Required: "
-                     "collection. Optional: k1 (default 1.8; term-frequency saturation) and b "
-                     "(default 1.0; document-length normalization). Fails when the collection "
-                     "does not exist."),
-     "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection created with lexical=True"},
-         "k1": {"type": "number", "default": 1.8, "description": "BM25 term-frequency saturation"},
-         "b": {"type": "number", "default": 1.0,
-               "description": "BM25 document-length normalization"}}},
-     "annotations": {"readOnlyHint": False, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-    {"name": "telys_tune",
-     "description": ("Produce a TuningPlan for a collection via its Tuner, and optionally apply "
-                     "it. Use to inspect or apply index/maintenance recommendations. Sibling: "
-                     "telys_build_ivf builds the IVF index directly; this tool plans and "
-                     "optionally applies tuning. Applying (dry_run=false) sets the default "
-                     "target recall + exact↔quantized crossover and IVF-builds oversized "
-                     "partitions (already-built ones are skipped) — instant settings plus a "
-                     "faiss-requiring build that grows with partition size, applied live "
-                     "in-process (this handler does not persist to disk) and not atomically, "
-                     "so a mid-apply failure can leave earlier settings in place. Verify the "
-                     "after-state with telys_stats. Required: collection. Optional: dry_run "
-                     "(plan-only vs apply; values on the parameter). Fails when the "
-                     "collection does not exist."),
-     "inputSchema": {"type": "object", "required": ["collection"], "properties": {
-         "collection": {"type": "string",
-                        "description": "name of an existing collection in the active store"},
-         "dry_run": {"type": "boolean",
-                     "description": "true = return the plan only; false = plan + apply; "
-                     "omit = the tuner's default"}}},
-     "annotations": {"readOnlyHint": False, "destructiveHint": False,
-                     "idempotentHint": False, "openWorldHint": False}},
-
+    {
+        "name": "telys_compact",
+        "description": (
+            "Flush tombstones and merge the delta segment into the base layout, "
+            "physically reclaiming space from deleted/updated rows; the store is "
+            "persisted. Use after large delete or update batches. Alternatives: "
+            "telys_delete to remove rows, telys_tune for index tuning. Required: "
+            "collection. Repeating with no pending changes is a no-op. Fails when the "
+            "collection does not exist."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection in the active store",
+                }
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_build_ivf",
+        "description": (
+            "Build per-partition IVF indexes and calibrate nprobe to a recall floor — "
+            "approximate search for partitions that have outgrown exact scans. "
+            "Maintenance sibling of telys_compact (physically reclaim space from "
+            "deletes) and telys_tune (plan and optionally apply tuning automatically). "
+            "Required: collection. Optional: min_rows (default 20000; only partitions "
+            "with at least this many rows get an IVF index — smaller ones keep exact "
+            "scans) and target_recall (default 0.98). Fails when the collection does not "
+            "exist; needs the optional faiss dependency — the error names the fix (pipx: "
+            "`pipx inject telys faiss-cpu`; venv: `pip install faiss-cpu`)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection in the active store",
+                },
+                "min_rows": {
+                    "type": "integer",
+                    "default": 20000,
+                    "description": "only partitions with at least this many rows get an IVF "
+                    "index (smaller stay exact)",
+                },
+                "target_recall": {
+                    "type": "number",
+                    "default": 0.98,
+                    "description": "recall floor the nprobe calibration targets",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_build_lexical",
+        "description": (
+            "Fit the BM25 lexical index over the collection's retained tokens and "
+            "persist it. Collections created through MCP are lexical-capable, so this "
+            "works out of the box after ingestion. This builds the lexical BM25 index; "
+            "telys_build_ivf builds the IVF vector index. Run after bulk ingestion and "
+            "before telys_search_lexical. Required: collection. Optional: k1 (default "
+            "1.8; term-frequency saturation) and b (default 1.0; document-length "
+            "normalization). Fails when the collection does not exist."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection created with lexical=True",
+                },
+                "k1": {
+                    "type": "number",
+                    "default": 1.8,
+                    "description": "BM25 term-frequency saturation",
+                },
+                "b": {
+                    "type": "number",
+                    "default": 1.0,
+                    "description": "BM25 document-length normalization",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_tune",
+        "description": (
+            "Produce a TuningPlan for a collection via its Tuner, and optionally apply "
+            "it. Use to inspect or apply index/maintenance recommendations. Sibling: "
+            "telys_build_ivf builds the IVF index directly; this tool plans and "
+            "optionally applies tuning. Applying (dry_run=false) sets the default "
+            "target recall + exact↔quantized crossover and IVF-builds oversized "
+            "partitions (already-built ones are skipped) — instant settings plus a "
+            "faiss-requiring build that grows with partition size, applied live "
+            "in-process (this handler does not persist to disk) and not atomically, "
+            "so a mid-apply failure can leave earlier settings in place. Verify the "
+            "after-state with telys_stats. Required: collection. Optional: dry_run "
+            "(plan-only vs apply; values on the parameter). Fails when the "
+            "collection does not exist."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["collection"],
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "name of an existing collection in the active store",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "true = return the plan only; false = plan + apply; "
+                    "omit = the tuner's default",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
     # ── auto-index (the LLM-facing repo scanner) ──────────────────────────────────────────────────────────
-    {"name": "telys_index_repo",
-     "description": ("Walk a repo directory — respecting .gitignore on git checkouts, else "
-                     "skipping common build/dep dirs; binaries and symlinks escaping the root are "
-                     "refused — chunk every text file, and ingest the chunks into a collection "
-                     "for telys_repo_search. Incremental: re-calls re-fingerprint each file "
-                     "(size, mtime), re-embed only changed files, tombstone removed ones, and "
-                     "no-op fast when nothing changed. Routing: telys_repo_search queries the "
-                     "index; telys_add/telys_upsert store manual memories. Returns status "
-                     "(built/refreshed/hit), repo_id, and file/chunk counts. All arguments "
-                     "optional: path (repo root; default: the server workspace, else CWD), "
-                     "collection (default 'repo_symbols'), mode ('windowed' default or 'file'), "
-                     "window_lines (48), window_overlap_lines (8), max_file_bytes / max_files / "
-                     "max_seconds (0 = unlimited), force (default false; rebuild every file). "
-                     "Fails when path is not a directory or the collection already exists with a "
-                     "partition key other than repo_id."),
-     "inputSchema": {"type": "object", "properties": {
-         "path": {"type": "string",
-                  "description": "repo root (defaults to server workspace / CWD)"},
-         "collection": {"type": "string", "default": _INDEX_COLLECTION_DEFAULT,
-                        "description": "target collection for the repo chunks (auto-created with "
-                        "partition_by='repo_id')"},
-         "mode": {"type": "string", "enum": ["file", "windowed"], "default": "windowed",
-                  "description": "'windowed' sliding line window or 'file' (one record per file)"},
-         "window_lines": {"type": "integer", "default": _DEFAULT_WINDOW_LINES,
-                          "description": "lines per chunk in windowed mode"},
-         "window_overlap_lines": {"type": "integer", "default": _DEFAULT_WINDOW_OVERLAP,
-                                  "description": "overlap lines between consecutive windows"},
-         "max_file_bytes": {"type": "integer", "default": _DEFAULT_MAX_FILE_BYTES,
-                            "description": "skip files larger than this many bytes; 0 = "
-                            "unlimited"},
-         "max_files": {"type": "integer", "default": _DEFAULT_MAX_FILES,
-                       "description": "stop after walking this many files; 0 = unlimited"},
-         "max_seconds": {"type": "integer", "default": _DEFAULT_MAX_SECONDS,
-                         "description": "wall-clock budget in seconds; 0 = unlimited"},
-         "force": {"type": "boolean", "default": False,
-                   "description": "ignore the fingerprint cache and rebuild every file"}}},
-     "annotations": {"readOnlyHint": False, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-
-    {"name": "telys_repo_search",
-     "description": ("Search the auto-indexed repo collection (default 'repo_symbols') with the "
-                     "on-device embedder. Every call first re-runs the incremental "
-                     "telys_index_repo against the server workspace — cheap on no-change — so "
-                     "hits are always fresh, and each hit carries the exact source slice re-read "
-                     "from disk. Use for 'map this codebase and search it' workflows. Required: "
-                     "query. Optional: top_k (default 5) and path_hint (exact repo-relative path "
-                     "to scope the search). Fails when no workspace is configured — set "
-                     "TELYS_MCP_WORKSPACE, launch `telys mcp --workspace <dir>`, or call "
-                     "telys_index_repo with an explicit path first. Note: the freshness re-index "
-                     "writes to the store, so this is not a read-only tool."),
-     "inputSchema": {"type": "object", "required": ["query"], "properties": {
-         "query": {"type": "string",
-                   "description": "text query; embedded on-device before searching"},
-         "top_k": {"type": "integer", "default": 5,
-                   "description": "maximum hits to return, ordered best-first"},
-         "path_hint": {"type": "string",
-                       "description": "exact path (relative to repo root) to scope the search"}}},
-     "annotations": {"readOnlyHint": False, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
-
-    {"name": "telys_workspace_info",
-     "description": ("Report the server's configured workspace: resolved path, repo_id, the "
-                     "auto-index collection name, tracked file count, and whether the fingerprint "
-                     "cache is persisted across restarts. Use to verify which repo "
-                     "telys_repo_search will index before calling it. Takes no arguments; the "
-                     "workspace fields are null when no workspace is configured — that is a "
-                     "report, not an error."),
-     "inputSchema": {"type": "object", "properties": {}},
-     "annotations": {"readOnlyHint": True, "destructiveHint": False,
-                     "idempotentHint": True, "openWorldHint": False}},
+    {
+        "name": "telys_index_repo",
+        "description": (
+            "Walk a repo directory — respecting .gitignore on git checkouts, else "
+            "skipping common build/dep dirs; binaries and symlinks escaping the root are "
+            "refused — chunk every text file, and ingest the chunks into a collection "
+            "for telys_repo_search. Incremental: re-calls re-fingerprint each file "
+            "(size, mtime), re-embed only changed files, tombstone removed ones, and "
+            "no-op fast when nothing changed. Routing: telys_repo_search queries the "
+            "index; telys_add/telys_upsert store manual memories. Returns status "
+            "(built/refreshed/hit), repo_id, and file/chunk counts. All arguments "
+            "optional: path (repo root; default: the server workspace, else CWD), "
+            "collection (default 'repo_symbols'), mode ('windowed' default or 'file'), "
+            "window_lines (48), window_overlap_lines (8), max_file_bytes / max_files / "
+            "max_seconds (0 = unlimited), force (default false; rebuild every file). "
+            "Fails when path is not a directory or the collection already exists with a "
+            "partition key other than repo_id."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "repo root (defaults to server workspace / CWD)",
+                },
+                "collection": {
+                    "type": "string",
+                    "default": _INDEX_COLLECTION_DEFAULT,
+                    "description": "target collection for the repo chunks (auto-created with "
+                    "partition_by='repo_id')",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["file", "windowed"],
+                    "default": "windowed",
+                    "description": "'windowed' sliding line window or 'file' (one record per file)",
+                },
+                "window_lines": {
+                    "type": "integer",
+                    "default": _DEFAULT_WINDOW_LINES,
+                    "description": "lines per chunk in windowed mode",
+                },
+                "window_overlap_lines": {
+                    "type": "integer",
+                    "default": _DEFAULT_WINDOW_OVERLAP,
+                    "description": "overlap lines between consecutive windows",
+                },
+                "max_file_bytes": {
+                    "type": "integer",
+                    "default": _DEFAULT_MAX_FILE_BYTES,
+                    "description": "skip files larger than this many bytes; 0 = unlimited",
+                },
+                "max_files": {
+                    "type": "integer",
+                    "default": _DEFAULT_MAX_FILES,
+                    "description": "stop after walking this many files; 0 = unlimited",
+                },
+                "max_seconds": {
+                    "type": "integer",
+                    "default": _DEFAULT_MAX_SECONDS,
+                    "description": "wall-clock budget in seconds; 0 = unlimited",
+                },
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "ignore the fingerprint cache and rebuild every file",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_repo_search",
+        "description": (
+            "Search the auto-indexed repo collection (default 'repo_symbols') with the "
+            "on-device embedder. Every call first re-runs the incremental "
+            "telys_index_repo against the server workspace — cheap on no-change — so "
+            "hits are always fresh, and each hit carries the exact source slice re-read "
+            "from disk. Use for 'map this codebase and search it' workflows. Required: "
+            "query. Optional: top_k (default 5) and path_hint (exact repo-relative path "
+            "to scope the search). Fails when no workspace is configured — set "
+            "TELYS_MCP_WORKSPACE, launch `telys mcp --workspace <dir>`, or call "
+            "telys_index_repo with an explicit path first. Note: the freshness re-index "
+            "writes to the store, so this is not a read-only tool."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "text query; embedded on-device before searching",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "maximum hits to return, ordered best-first",
+                },
+                "path_hint": {
+                    "type": "string",
+                    "description": "exact path (relative to repo root) to scope the search",
+                },
+            },
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "telys_workspace_info",
+        "description": (
+            "Report the server's configured workspace: resolved path, repo_id, the "
+            "auto-index collection name, tracked file count, and whether the fingerprint "
+            "cache is persisted across restarts. Use to verify which repo "
+            "telys_repo_search will index before calling it. Takes no arguments; the "
+            "workspace fields are null when no workspace is configured — that is a "
+            "report, not an error."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
 ]
 
 
@@ -1155,8 +1725,11 @@ class MCPServer:
         method = msg.get("method")
         if method == "initialize":
             client_ver = (msg.get("params") or {}).get("protocolVersion") or PROTOCOL_VERSION
-            return {"protocolVersion": client_ver, "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "telys", "version": __version__}}
+            return {
+                "protocolVersion": client_ver,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "telys", "version": __version__},
+            }
         if method in ("notifications/initialized", "notifications/cancelled"):
             return None  # notification, no reply
         if method == "ping":
@@ -1169,12 +1742,18 @@ class MCPServer:
             args = params.get("arguments") or {}
             fn = _DISPATCH.get(name)
             if fn is None:
-                return {"content": [{"type": "text", "text": f"unknown tool: {name}"}], "isError": True}
+                return {
+                    "content": [{"type": "text", "text": f"unknown tool: {name}"}],
+                    "isError": True,
+                }
             try:
                 result = fn(self.memory, args)
                 return {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False}
             except Exception as exc:  # noqa: BLE001 — surface tool errors as MCP tool errors, not crashes
-                return {"content": [{"type": "text", "text": f"{type(exc).__name__}: {exc}"}], "isError": True}
+                return {
+                    "content": [{"type": "text", "text": f"{type(exc).__name__}: {exc}"}],
+                    "isError": True,
+                }
         return {"__jsonrpc_error__": {"code": -32601, "message": f"method not found: {method}"}}
 
     def serve(self, stdin=None, stdout=None) -> int:
@@ -1193,7 +1772,11 @@ class MCPServer:
             if msg_id is None:
                 continue  # notification (or a response we don't emit) — nothing to send back
             if isinstance(result, dict) and "__jsonrpc_error__" in result:
-                out: dict[str, Any] = {"jsonrpc": "2.0", "id": msg_id, "error": result["__jsonrpc_error__"]}
+                out: dict[str, Any] = {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": result["__jsonrpc_error__"],
+                }
             else:
                 out = {"jsonrpc": "2.0", "id": msg_id, "result": result}
             stdout.write(json.dumps(out) + "\n")
@@ -1202,6 +1785,7 @@ class MCPServer:
 
 
 # ── optional traffic monitor (`telys mcp --monitor`): audit what the assistant host actually calls ──────
+
 
 def _monitor_record(log_path: str, direction: str, line: str) -> None:
     line = line.strip()
@@ -1249,21 +1833,45 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(prog="telys mcp", description="Telys MCP stdio server")
-    parser.add_argument("--path", default=None,
-                        help="memory directory (default: ~/.telys/memory or $TELYS_MEMORY_PATH)")
-    parser.add_argument("--workspace", default=None,
-                        help=("repo root for the auto-indexer (default: $TELYS_MCP_WORKSPACE or none — "
-                              "the LLM must then pass `path` to telys_index_repo / telys_repo_search)"))
-    parser.add_argument("--persistent-index", action="store_true",
-                        help=("persist the auto-index fingerprint cache to <memory_path>/.telys_mcp_"
-                              "fingerprints.json so restarts skip re-embedding an unchanged repo"))
-    parser.add_argument("--monitor", action="store_true",
-                        help=("append every JSON-RPC request/response to <memory_path>/mcp-monitor.jsonl "
-                              "so the assistant host's tool usage can be audited"))
-    parser.add_argument("--monitor-log", default=None, metavar="PATH",
-                        help="monitor log file (implies --monitor; default: <memory_path>/mcp-monitor.jsonl)")
+    parser.add_argument(
+        "--path",
+        default=None,
+        help="memory directory (default: ~/.telys/memory or $TELYS_MEMORY_PATH)",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help=(
+            "repo root for the auto-indexer (default: $TELYS_MCP_WORKSPACE or none — "
+            "the LLM must then pass `path` to telys_index_repo / telys_repo_search)"
+        ),
+    )
+    parser.add_argument(
+        "--persistent-index",
+        action="store_true",
+        help=(
+            "persist the auto-index fingerprint cache to <memory_path>/.telys_mcp_"
+            "fingerprints.json so restarts skip re-embedding an unchanged repo"
+        ),
+    )
+    parser.add_argument(
+        "--monitor",
+        action="store_true",
+        help=(
+            "append every JSON-RPC request/response to <memory_path>/mcp-monitor.jsonl "
+            "so the assistant host's tool usage can be audited"
+        ),
+    )
+    parser.add_argument(
+        "--monitor-log",
+        default=None,
+        metavar="PATH",
+        help="monitor log file (implies --monitor; default: <memory_path>/mcp-monitor.jsonl)",
+    )
     args = parser.parse_args(argv)
-    memory = TelysMemory(args.path, workspace=args.workspace, persistent_index=args.persistent_index)
+    memory = TelysMemory(
+        args.path, workspace=args.workspace, persistent_index=args.persistent_index
+    )
     log = args.monitor_log
     if args.monitor and not log:
         log = os.path.join(memory.path, "mcp-monitor.jsonl")
