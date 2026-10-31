@@ -50,6 +50,11 @@ class RuntimeHandle:
         raise NotImplementedError
 
     def update(self, index, iids, vecs, keys, columns, texts=None):
+        """Update rows; texts=None explicitly means document text is unchanged.
+
+        Implementations retain existing raw text and lexical token hashes. Callers must pass texts whenever
+        document content changes; the vector-only SDK upsert path uses upsert_texts for that purpose.
+        """
         raise NotImplementedError
 
     # query
