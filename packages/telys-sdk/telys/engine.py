@@ -215,6 +215,11 @@ class Collection:
         )
 
     def upsert(self, vectors, ids, metadata):
+        """Add or replace vectors/metadata while leaving existing document text unchanged.
+
+        Lexical token hashes and stored raw text are retained. Use upsert_texts whenever document content
+        changes; new rows inserted by this vector-only method have no document text until it is supplied.
+        """
         return self._ingest(vectors, ids, metadata, upsert=True)
 
     # ── query (returns external ids) ────────────────────────────────────────────────────────────────
