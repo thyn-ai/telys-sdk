@@ -6,12 +6,13 @@ integrations that need sub-millisecond put/get of binary payloads (e.g. vLLM KV 
 vector-collection overhead.
 
 Persistence:
-  - ``<path>/data.slab``   : append-only record stream
+  - ``<path>/data.slab``   : append-only record and tombstone stream
   - ``<path>/index.log``   : append-only index mutations (O(1) per op, no rewrite-with-count regression)
-  - ``<path>/index.json``  : compacted snapshot, written on ``close()`` / ``sync()``
+  - ``<path>/index.json``  : compacted snapshot, written on recovery / ``close()`` / ``sync()``
 
-The slab is the source of truth: if the index files are missing or corrupt, the store scans the slab and
-rebuilds. The latest record for a key wins, so overwrite-by-put and crash-after-append are both safe.
+The slab is the source of truth: if the index files are missing or corrupt, a tombstone-aware slab is scanned
+and its recovered index is persisted. Valid legacy TELYBB01 stores are migrated on open. A legacy slab with
+records but no valid snapshot has ambiguous deletion history and fails closed instead of resurrecting keys.
 """
 from __future__ import annotations
 
@@ -22,7 +23,8 @@ import threading
 from collections.abc import Iterable
 from typing import Any
 
-MAGIC = b"TELYBB01"
+MAGIC = b"TELYBB02"
+LEGACY_MAGIC = b"TELYBB01"
 FORMAT_VERSION = 1
 HEADER_FMT = ">IIQ"  # key_len: uint32, meta_len: uint32, payload_len: uint64
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
@@ -33,6 +35,8 @@ SLAB_NAME = "data.slab"
 _MAX_KEY_LEN = 0xFFFFFFFF
 _MAX_META_LEN = 0xFFFFFFFF
 _MAX_PAYLOAD_LEN = 0xFFFFFFFFFFFFFFFF
+TOMBSTONE_META_LEN = _MAX_META_LEN
+TOMBSTONE_PAYLOAD_LEN = _MAX_PAYLOAD_LEN
 
 
 class BlobStoreError(RuntimeError):
@@ -63,6 +67,7 @@ class BlobStore:
         self._index: dict[str, dict[str, int]] = {}
         self._slab: Any = None
         self._log: Any = None
+        self._slab_magic = MAGIC
 
         self._open()
 
@@ -75,20 +80,27 @@ class BlobStore:
                 os.fsync(f.fileno())
         else:
             with open(self._slab_path, "rb") as f:
-                if f.read(len(MAGIC)) != MAGIC:
+                magic = f.read(len(MAGIC))
+                if magic not in (MAGIC, LEGACY_MAGIC):
                     raise BlobStoreError(
                         f"{self._slab_path} is not a Telys blob slab (bad magic)"
                     )
+                self._slab_magic = magic
 
         self._slab = open(self._slab_path, "a+b")  # noqa: SIM115 — long-lived handle closed in close()
         self._log = open(self._log_path, "a+", encoding="utf-8") if os.path.exists(self._log_path) else None  # noqa: SIM115
 
-        self._index = self._load_index()
-        if not self._index and os.path.getsize(self._slab_path) > len(MAGIC):
-            # Empty index but non-empty slab: scan and snapshot.
-            self._index = self._scan_slab()
-            if self._index:
-                self._write_snapshot(sync=False)
+        self._index, recovered, log_deletes = self._load_index()
+        needs_snapshot = recovered
+        if self._slab_magic == LEGACY_MAGIC:
+            self._upgrade_legacy_slab()
+            needs_snapshot = True
+        elif log_deletes:
+            # A crash can leave a flushed delete log without its buffered slab tombstone.
+            self._append_tombstones(log_deletes, sync=True)
+            needs_snapshot = True
+        if needs_snapshot:
+            self._write_snapshot(sync=True)
 
     def close(self) -> None:
         with self._lock:
@@ -111,39 +123,52 @@ class BlobStore:
         self.close()
 
     # ── index management ─────────────────────────────────────────────────────────────────────────────
-    def _load_index(self) -> dict[str, dict[str, int]]:
-        """Load the current index: snapshot + replayed log, with slab scan as fallback."""
-        snapshot: dict[str, dict[str, int]] = {}
-        snapshot_ok = False
+    def _load_index(self) -> tuple[dict[str, dict[str, int]], bool, set[str]]:
+        """Load the index, returning recovery state and deletes still needing tombstones."""
+        snapshot: dict[str, dict[str, int]] | None = None
+        snapshot_error: Exception | None = None
         if os.path.exists(self._snapshot_path):
             try:
                 snapshot = self._read_snapshot()
-                snapshot_ok = True
-            except (OSError, ValueError, KeyError):
-                snapshot = {}
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                snapshot_error = exc
 
+        recovered = False
+        slab_tombstones: set[str] = set()
+        if snapshot is None:
+            if self._slab_magic == LEGACY_MAGIC and os.path.getsize(self._slab_path) > len(MAGIC):
+                raise BlobStoreError(
+                    "cannot recover a legacy TELYBB01 slab with records but no valid index snapshot; "
+                    "historical deletions are ambiguous"
+                ) from snapshot_error
+            snapshot = self._scan_slab(slab_tombstones)
+            recovered = True
+
+        log_deletes: set[str] = set()
         if self._log is not None:
             try:
                 self._log.seek(0)
                 log_index = self._replay_log(self._log)
-            except (OSError, ValueError, KeyError):
-                log_index = {}
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                raise BlobStoreError(f"invalid blob index log {self._log_path}: {exc}") from exc
             # Log entries are authoritative over the snapshot.
-            snapshot.update(log_index)
-            return snapshot
+            for key, mutation in log_index.items():
+                if mutation is None:
+                    snapshot.pop(key, None)
+                    log_deletes.add(key)
+                else:
+                    snapshot[key] = mutation
 
-        if snapshot_ok:
-            return snapshot
-
-        # No usable index files: scan the slab.
-        return self._scan_slab()
+        return snapshot, recovered, log_deletes.difference(slab_tombstones)
 
     def _read_snapshot(self) -> dict[str, dict[str, int]]:
         with open(self._snapshot_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if data.get("version") != FORMAT_VERSION:
             raise ValueError(f"unsupported blob index version {data.get('version')}")
-        records = data.get("records", {})
+        records = data["records"]
+        if not isinstance(records, dict):
+            raise TypeError("blob index records must be an object")
         size = os.path.getsize(self._slab_path)
         for key, rec in records.items():
             off = rec["offset"]
@@ -173,6 +198,7 @@ class BlobStore:
         return mutations
 
     def _write_snapshot(self, sync: bool = False) -> None:
+        log_present = self._log is not None or os.path.exists(self._log_path)
         tmp = self._snapshot_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"version": FORMAT_VERSION, "records": self._index}, f, separators=(",", ":"))
@@ -180,7 +206,10 @@ class BlobStore:
                 f.flush()
                 os.fsync(f.fileno())
         os.replace(tmp, self._snapshot_path)
-        # After snapshotting, the log is redundant; truncate it on next use.
+        if sync and log_present:
+            # The rename must be durable before a crash can make the log removal durable.
+            self._fsync_directory()
+        # A durable snapshot makes the already-replayed log redundant.
         if self._log is not None:
             self._log.close()
             self._log = None
@@ -188,6 +217,8 @@ class BlobStore:
             os.remove(self._log_path)
         except FileNotFoundError:
             pass
+        if sync:
+            self._fsync_directory()
 
     def _ensure_log_open(self) -> Any:
         if self._log is None:
@@ -206,6 +237,13 @@ class BlobStore:
         fh.flush()
         os.fsync(fh.fileno())
 
+    def _fsync_directory(self) -> None:
+        fd = os.open(self._path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
     def sync(self) -> None:
         """Explicitly flush the slab and write a compacted snapshot.
 
@@ -216,22 +254,63 @@ class BlobStore:
             self._fsync(self._slab)
             self._write_snapshot(sync=True)
 
-    def _scan_slab(self) -> dict[str, dict[str, int]]:
+    def _append_tombstones(self, keys: Iterable[str], sync: bool) -> None:
+        self._slab.seek(0, 2)
+        for key in sorted(keys):
+            self._slab.write(self._encode_tombstone(key))
+        if sync:
+            self._fsync(self._slab)
+
+    def _upgrade_legacy_slab(self) -> None:
+        self._fsync(self._slab)
+        historical_index = self._scan_slab()
+        deleted_keys = set(historical_index).difference(self._index)
+        self._append_tombstones(deleted_keys, sync=True)
+        with open(self._slab_path, "r+b") as f:
+            f.write(MAGIC)
+            f.flush()
+            os.fsync(f.fileno())
+        self._slab_magic = MAGIC
+
+    def _scan_slab(self, tombstones: set[str] | None = None) -> dict[str, dict[str, int]]:
         index: dict[str, dict[str, int]] = {}
         with open(self._slab_path, "rb") as f:
-            if f.read(len(MAGIC)) != MAGIC:
+            if f.read(len(MAGIC)) != self._slab_magic:
                 raise BlobStoreError("bad magic while scanning slab")
-            while True:
+            size = os.fstat(f.fileno()).st_size
+            while f.tell() < size:
                 offset = f.tell()
                 header = f.read(HEADER_SIZE)
-                if len(header) == 0:
-                    break
                 if len(header) != HEADER_SIZE:
                     raise BlobStoreError(f"truncated record header at offset {offset}")
                 key_len, meta_len, payload_len = struct.unpack(HEADER_FMT, header)
-                if key_len > _MAX_KEY_LEN or meta_len > _MAX_META_LEN or payload_len > _MAX_PAYLOAD_LEN:
-                    raise BlobStoreError(f"impossible record lengths at offset {offset}")
-                key = f.read(key_len).decode("utf-8")
+                is_tombstone = (
+                    meta_len == TOMBSTONE_META_LEN and payload_len == TOMBSTONE_PAYLOAD_LEN
+                )
+                if (
+                    self._slab_magic == MAGIC
+                    and not is_tombstone
+                    and (meta_len == TOMBSTONE_META_LEN or payload_len == TOMBSTONE_PAYLOAD_LEN)
+                ):
+                    raise BlobStoreError(f"reserved record length at offset {offset}")
+                body_len = key_len if is_tombstone else key_len + meta_len + payload_len
+                available = size - offset - HEADER_SIZE
+                if body_len > available:
+                    raise BlobStoreError(
+                        f"truncated record body at offset {offset}: "
+                        f"expected {body_len} bytes, found {available}"
+                    )
+                try:
+                    key = f.read(key_len).decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise BlobStoreError(f"invalid UTF-8 key at offset {offset}") from exc
+                if is_tombstone:
+                    if tombstones is not None:
+                        tombstones.add(key)
+                    index.pop(key, None)
+                    continue
+                if tombstones is not None:
+                    tombstones.discard(key)
                 f.seek(meta_len + payload_len, 1)
                 index[key] = {
                     "offset": offset,
@@ -261,12 +340,20 @@ class BlobStore:
         meta_b = json.dumps(meta, ensure_ascii=False, sort_keys=True).encode("utf-8")
         if len(key_b) > _MAX_KEY_LEN:
             raise ValueError("key too large")
-        if len(meta_b) > _MAX_META_LEN:
+        if len(meta_b) >= TOMBSTONE_META_LEN:
             raise ValueError("metadata too large")
-        if len(payload) > _MAX_PAYLOAD_LEN:
+        if len(payload) >= TOMBSTONE_PAYLOAD_LEN:
             raise ValueError("payload too large")
         header = struct.pack(HEADER_FMT, len(key_b), len(meta_b), len(payload))
         return key_b, meta_b, payload, header
+
+    @staticmethod
+    def _encode_tombstone(key: str) -> bytes:
+        key_b = key.encode("utf-8")
+        if len(key_b) > _MAX_KEY_LEN:
+            raise ValueError("key too large")
+        header = struct.pack(HEADER_FMT, len(key_b), TOMBSTONE_META_LEN, TOMBSTONE_PAYLOAD_LEN)
+        return header + key_b
 
     # ── core ops ─────────────────────────────────────────────────────────────────────────────────────
     def put(self, key: str, payload: bytes, metadata: dict | None = None, *, sync: bool = False) -> None:
@@ -311,12 +398,13 @@ class BlobStore:
     def delete(self, key: str, *, sync: bool = False) -> None:
         """Remove ``key``. Idempotent: missing keys are ignored.
 
-        ``sync=True`` fsyncs the index log before returning.
+        ``sync=True`` fsyncs the slab tombstone and index log before returning.
         """
         self._assert_str_key(key)
         with self._lock:
             if key not in self._index:
                 return
+            self._append_tombstones((key,), sync=sync)
             del self._index[key]
             self._append_log({"k": key, "d": True}, sync=sync)
 
@@ -413,9 +501,18 @@ class BlobStore:
             or payload_len != rec["payload_len"]
         ):
             raise BlobStoreError(f"index/slab mismatch for key {expected_key!r}")
-        stored_key = self._slab.read(key_len).decode("utf-8")
+        stored_key_b = self._slab.read(key_len)
+        meta_b = self._slab.read(meta_len)
+        payload = self._slab.read(payload_len)
+        if len(stored_key_b) != key_len or len(meta_b) != meta_len or len(payload) != payload_len:
+            raise BlobStoreError(f"truncated record for key {expected_key!r}")
+        try:
+            stored_key = stored_key_b.decode("utf-8")
+            meta = json.loads(meta_b.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BlobStoreError(f"corrupt record for key {expected_key!r}") from exc
         if stored_key != expected_key:
             raise BlobStoreError(f"index points to wrong key: {stored_key!r}")
-        meta = json.loads(self._slab.read(meta_len).decode("utf-8"))
-        payload = self._slab.read(payload_len)
+        if not isinstance(meta, dict):
+            raise BlobStoreError(f"invalid metadata for key {expected_key!r}")
         return payload, meta
